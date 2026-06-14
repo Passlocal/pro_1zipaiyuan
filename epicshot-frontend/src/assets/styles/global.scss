@@ -1,0 +1,136 @@
+@use './variables.scss' as *;
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: $font-family;
+  color: $color-text;
+  background: $color-bg;
+  line-height: 1.6;
+  overflow: hidden; // SPA body
+}
+
+#app {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+a {
+  color: $color-primary;
+  text-decoration: none;
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: inherit;
+}
+
+input, textarea, select {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+// ============ 工具类 ============
+.flex { display: flex; }
+.flex-col { display: flex; flex-direction: column; }
+.flex-center { display: flex; align-items: center; justify-content: center; }
+.flex-between { display: flex; align-items: center; justify-content: space-between; }
+.flex-1 { flex: 1; }
+.gap-4 { gap: 4px; }
+.gap-8 { gap: 8px; }
+.gap-12 { gap: 12px; }
+.gap-16 { gap: 16px; }
+
+// ============ 滚动条美化 ============
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: $color-border;
+  border-radius: 3px;
+  &:hover {
+    background: $color-text-muted;
+  }
+}
+
+// ============ 动画 ============
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes highlightFlash {
+  0% { box-shadow: 0 0 0 0 rgba($color-primary, 0.5); }
+  70% { box-shadow: 0 0 0 10px rgba($color-primary, 0); }
+  100% { box-shadow: 0 0 0 0 rgba($color-primary, 0); }
+}
+
+.fade-in { animation: fadeIn 0.2s ease; }
+.slide-up { animation: slideUp 0.3s ease; }
+.loading-pulse { animation: pulse 1.5s ease-in-out infinite; }
+
+// ============ Toast通知条 ============
+.toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10000;
+  padding: 10px 20px;
+  border-radius: $radius-md;
+  font-size: 14px;
+  font-weight: 500;
+  animation: slideUp 0.3s ease;
+
+  &.toast-warning {
+    background: #fef3e0;
+    color: #e37400;
+    border: 1px solid #fcd19d;
+  }
+
+  &.toast-error {
+    background: #fce8e6;
+    color: #c5221f;
+    border: 1px solid #f5c6cb;
+  }
+
+  &.toast-success {
+    background: #e6f4ea;
+    color: #137333;
+    border: 1px solid #a8dab5;
+  }
+}
