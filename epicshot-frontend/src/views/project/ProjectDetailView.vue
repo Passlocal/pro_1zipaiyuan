@@ -19,8 +19,8 @@
         <button class="btn-toolbar" title="分享" @click="handleShare">
           <span>🔗</span> 分享
         </button>
-        <button class="btn-toolbar" title="AI样片" @click="router.push(`/project/${projectId}/color-check`)">
-          <span>✨</span> AI样片
+        <button class="btn-toolbar" title="色差巡检" @click="router.push(`/project/${projectId}/color-check`)">
+          <span>✨</span> 色差巡检
         </button>
         <button class="btn-toolbar" title="导出意见" @click="handleExportComments">
           <span>📥</span> 导出意见
@@ -222,6 +222,7 @@ import { annotationApi } from '@/api/annotations'
 import { projectApi } from '@/api/projects'
 import ImageViewer from '@/components/viewer/ImageViewer.vue'
 import type { ProjectStatus, AnnotationToolType, AnnotationColor, PenWidth, ArrowWidth, ImageMedia, CommentCard, Annotation } from '@/types/models'
+import { PROJECT_STATUS_LABELS } from '@/types/models'
 
 const router = useRouter()
 const route = useRoute()
@@ -263,14 +264,7 @@ function showToast(msg: string, type: 'success' | 'error' = 'success') {
   setTimeout(() => { toastMsg.value = '' }, 3000)
 }
 
-const statusLabelMap: Record<ProjectStatus, string> = {
-  draft: '草稿',
-  review: '待确认',
-  in_progress: '修改中',
-  final_review: '待确稿',
-  completed: '已完成',
-  archived: '已归档',
-}
+const statusLabelMap: Record<ProjectStatus, string> = PROJECT_STATUS_LABELS
 
 function statusLabel(status: ProjectStatus): string {
   return statusLabelMap[status] || status
@@ -350,10 +344,12 @@ function navigateImage(direction: number) {
 
 function onAnnotationCreated(_annotation: Annotation) {
   // Annotation is already persisted in store.addAnnotation
+  showToast('标注已添加', 'success')
 }
 
 function onAnnotationDeleted(_id: string) {
   // Annotation is already removed in store.removeAnnotation
+  showToast('标注已删除', 'success')
 }
 
 async function handleShare() {
@@ -407,7 +403,7 @@ watch(projectId, (id) => {
 
 watch(showAddUnit, (val) => {
   if (val) {
-    newUnitName.value = '新拍摄单元'
+    newUnitName.value = '新产品单元'
     setTimeout(() => addUnitInputRef.value?.focus(), 50)
   }
 })

@@ -25,7 +25,7 @@
     </div>
 
     <!-- Fullscreen toggle button -->
-    <button class="image-viewer__fullscreen-btn" @click.stop="viewer.toggleFullscreen()" :title="viewer.isFullscreen.value ? '退出全屏' : '全屏'">
+    <button class="image-viewer__fullscreen-btn" @click.stop="viewer.toggleFullscreen()" :title="viewer.isFullscreen.value ? '退出全屏' : '全屏'" :aria-label="viewer.isFullscreen.value ? '退出全屏' : '全屏'">
       <svg v-if="viewer.isFullscreen.value" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
         <polyline points="4 8 4 4 8 4"/>
         <polyline points="20 8 20 4 16 4"/>
@@ -80,7 +80,7 @@
     <div v-if="loadError" class="image-viewer__error">
       <span class="image-viewer__error-icon">!</span>
       <span>图片加载失败</span>
-      <button class="image-viewer__retry-btn" @click="retryLoad">重试</button>
+      <button class="image-viewer__retry-btn" @click="retryLoad" aria-label="重新加载图片">重试</button>
     </div>
   </div>
 </template>

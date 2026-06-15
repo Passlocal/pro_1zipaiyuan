@@ -73,7 +73,7 @@
         @click="goToProject(project.id)"
       >
         <div class="card-thumbnail">
-          <img v-if="projectThumbnails[project.id]" :src="projectThumbnails[project.id]" :alt="project.clientName" />
+          <img v-if="projectThumbnails[project.id]" :src="projectThumbnails[project.id]" :alt="project.name || project.clientName || '项目'" />
           <div v-else class="thumbnail-placeholder">
             <span>{{ project.name?.charAt(0) || project.clientName?.charAt(0) || 'P' }}</span>
           </div>
@@ -145,7 +145,7 @@
           >
             <span class="upload-icon">📁</span>
             <p class="upload-text">拖拽图片到此处上传</p>
-            <p class="upload-hint">支持 JPG / PNG / TIFF 格式，可多选</p>
+            <p class="upload-hint">支持 JPG / PNG / TIFF / WebP 格式，可多选</p>
             <label class="upload-btn">
               选择文件
               <input type="file" multiple accept="image/*" hidden @change="onFileSelect" />
@@ -167,12 +167,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import { projectApi } from '@/api/projects'
 import { useToast } from '@/composables/useToast'
 import type { ProjectStatus } from '@/types/models'
+import { PROJECT_STATUS_LABELS } from '@/types/models'
 
 const toast = useToast()
 
@@ -193,14 +194,7 @@ const activeStatus = ref('')
 const searchQuery = ref('')
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
-const statusLabelMap: Record<ProjectStatus, string> = {
-  draft: '草稿',
-  review: '待确认',
-  in_progress: '修改中',
-  final_review: '待确稿',
-  completed: '已完成',
-  archived: '已归档',
-}
+const statusLabelMap: Record<ProjectStatus, string> = PROJECT_STATUS_LABELS
 
 const stats = computed(() => {
   const list = projectStore.projects
@@ -365,6 +359,10 @@ async function handleCreate() {
 
 onMounted(async () => {
   await loadProjects()
+})
+
+onUnmounted(() => {
+  if (searchTimer) clearTimeout(searchTimer)
 })
 </script>
 

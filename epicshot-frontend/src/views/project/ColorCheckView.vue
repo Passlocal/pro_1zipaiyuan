@@ -5,7 +5,7 @@
         <button class="btn-back" @click="router.back()">
           <span>← 返回</span>
         </button>
-        <h1 class="page-title">组图色差巡检</h1>
+        <h1 class="page-title">色差巡检</h1>
       </div>
       <div class="header-actions">
         <button class="btn-inspect" @click="runCheck" :disabled="checking">
@@ -29,7 +29,7 @@
     <!-- 空状态 -->
     <div v-if="!report && !checking && !checkError" class="empty-state">
       <span class="empty-icon">🔍</span>
-      <p>点击"一键巡检"开始分析组图色差</p>
+      <p>点击"一键巡检"开始分析色差</p>
     </div>
 
     <!-- 错误状态 -->
@@ -73,6 +73,41 @@
           </button>
         </div>
       </div>
+
+      <!-- 已忽略项 -->
+      <div v-if="ignoredItems.length > 0" class="ignored-section">
+        <div class="ignored-header">
+          <span>已忽略 {{ ignoredItems.length }} 项</span>
+        </div>
+        <div class="results-list">
+          <div
+            v-for="item in ignoredItems"
+            :key="item.imageId"
+            class="result-item result-item--ignored"
+          >
+            <div class="result-thumbnail">
+              <img v-if="item.thumbnailUrl" :src="item.thumbnailUrl" :alt="item.imageId" />
+              <div v-else class="thumb-placeholder">
+                <span>🖼️</span>
+              </div>
+            </div>
+            <div class="result-info">
+              <div class="result-type-row">
+                <span class="deviation-badge" :class="'deviation--' + item.deviationType">
+                  {{ deviationLabel(item.deviationType) }}
+                </span>
+                <span class="deviation-value" :class="item.deviationValue > 0 ? 'value-up' : 'value-down'">
+                  {{ item.deviationValue > 0 ? '↑' : '↓' }} {{ Math.abs(item.deviationValue).toFixed(1) }}
+                </span>
+              </div>
+              <p class="result-suggestion">{{ item.suggestion }}</p>
+            </div>
+            <button class="btn-undo" @click="undoIgnore(item.imageId)">
+              撤销
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -103,6 +138,11 @@ const visibleItems = computed(() => {
   return report.value.items.filter((item) => !ignoredIds.value.has(item.imageId))
 })
 
+const ignoredItems = computed(() => {
+  if (!report.value) return []
+  return report.value.items.filter((item) => ignoredIds.value.has(item.imageId))
+})
+
 function deviationLabel(type: ColorCheckItem['deviationType']): string {
   const map: Record<ColorCheckItem['deviationType'], string> = {
     color_temp: '色温',
@@ -114,6 +154,10 @@ function deviationLabel(type: ColorCheckItem['deviationType']): string {
 
 function ignoreItem(imageId: string) {
   ignoredIds.value.add(imageId)
+}
+
+function undoIgnore(imageId: string) {
+  ignoredIds.value.delete(imageId)
 }
 
 function exportPdf() {
@@ -171,9 +215,13 @@ async function runCheck() {
       }
     }
 
-    report.value = result || { id: taskId, projectId: projectId.value, totalImages: 0, abnormalCount: 0, items: [], createdAt: new Date().toISOString() }
+    if (result) {
+      report.value = result
+    } else {
+      report.value = null
+      checkError.value = true
+    }
     progress.value = 100
-    if (!result) checkError.value = true
   } catch (err: any) {
     console.error('[ColorCheck] Error:', err)
     checkError.value = true
@@ -501,5 +549,36 @@ onUnmounted(() => {
     border-color: $color-text-muted;
     background: $color-surface-hover;
   }
+}
+
+.btn-undo {
+  padding: 5px 14px;
+  font-size: 12px;
+  color: $color-primary;
+  border: 1px solid $color-primary;
+  border-radius: $radius-sm;
+  transition: all 0.15s;
+  flex-shrink: 0;
+  background: rgba($color-primary, 0.05);
+
+  &:hover {
+    background: rgba($color-primary, 0.12);
+  }
+}
+
+.ignored-section {
+  border-top: 1px solid $color-border-light;
+  padding-top: 16px;
+  margin-top: 8px;
+}
+
+.ignored-header {
+  padding: 0 8px 8px 8px;
+  font-size: 13px;
+  color: $color-text-muted;
+}
+
+.result-item--ignored {
+  opacity: 0.6;
 }
 </style>

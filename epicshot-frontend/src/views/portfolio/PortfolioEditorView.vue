@@ -222,7 +222,10 @@ async function generatePortfolio() {
 }
 
 async function savePortfolio() {
-  if (!portfolioId.value) return
+  if (!portfolioId.value) {
+    toast.error('请先生成作品集')
+    return
+  }
   saving.value = true
   try {
     await portfolioApi.update(portfolioId.value, {
@@ -271,7 +274,13 @@ onMounted(() => {
       contactInfo.value = p.contactInfo
       portfolioImages.value = p.images || []
     }
-  }).catch(() => { /* 尚未生成 */ })
+  }).catch((e: any) => {
+    // 区分 404 (尚未生成) 和 其他网络错误
+    if (e?.response?.status !== 404) {
+      console.error('获取作品集失败:', e)
+      toast.error('加载作品集失败: ' + (e?.response?.data?.message || e?.message || '请稍后重试'))
+    }
+  })
 })
 </script>
 

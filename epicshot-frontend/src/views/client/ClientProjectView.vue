@@ -27,7 +27,7 @@
         <div class="image-viewer" v-if="currentImageUrl">
           <img
             :src="currentImageUrl"
-            alt="项目图片"
+            :alt="project.clientName || '项目图片'"
             class="viewer-image"
           />
           <div v-if="projectImages.length > 1" class="image-counter">
@@ -111,8 +111,12 @@
     <div v-else-if="loading" class="loading-state">
       <span class="loading-pulse">加载中...</span>
     </div>
-    <div v-else class="error-state">
+    <div v-else-if="errorType === 'not_found'" class="error-state">
       <p>项目不存在或链接已失效</p>
+    </div>
+    <div v-else class="error-state">
+      <p>网络错误，请检查连接后重试</p>
+      <button class="btn-retry" @click="fetchProject">重新加载</button>
     </div>
 
     <!-- 底部确认栏 -->
@@ -130,7 +134,7 @@
     <div v-if="showPreviewModal" class="modal-overlay" @click.self="showPreviewModal = false">
       <div class="modal-content preview-modal">
         <h3 class="modal-title">确稿确认</h3>
-        <p class="modal-desc">请确认以下意见处理结果后点击「确认确稿」</p>
+        <p class="modal-desc">请确认以下意见处理结果后点击「确稿」</p>
 
         <div class="preview-list">
           <div v-for="(card, idx) in cards" :key="card.id" class="preview-item">
@@ -156,7 +160,7 @@
             :disabled="confirming"
             @click="confirmAll"
           >
-            {{ confirming ? '提交中...' : '确认确稿' }}
+            {{ confirming ? '提交中...' : '确稿' }}
           </button>
         </div>
       </div>
@@ -180,6 +184,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { projectApi } from '@/api/projects'
 import { useToast } from '@/composables/useToast'
 import type { Project, CommentCard, ImageMedia, ProjectStatus } from '@/types/models'
+import { PROJECT_STATUS_LABELS } from '@/types/models'
 
 const toast = useToast()
 
@@ -204,14 +209,7 @@ const pendingCount = computed(() => {
 const cardReplies = ref<Record<string, string>>({})
 const cardStates = ref<Record<string, 'confirmed' | 'modify' | null>>({})
 
-const statusLabelMap: Record<ProjectStatus, string> = {
-  draft: '草稿',
-  review: '待确认',
-  in_progress: '修改中',
-  final_review: '待确稿',
-  completed: '已完成',
-  archived: '已归档',
-}
+const statusLabelMap: Record<ProjectStatus, string> = PROJECT_STATUS_LABELS
 
 const statusLabel = computed(() => {
   if (!project.value) return ''
@@ -233,7 +231,8 @@ const progressPercent = computed(() => {
 
 const currentImageUrl = computed(() => {
   if (projectImages.value.length > 0) {
-    return projectImages.value[currentImageIndex.value]?.thumbnailUrl || projectImages.value[currentImageIndex.value]?.url || ''
+    const img = projectImages.value[currentImageIndex.value]
+    return img?.thumbnailUrls?.[0] || img?.originalUrl || ''
   }
   return project.value?.thumbnailUrl || ''
 })
@@ -267,6 +266,8 @@ async function submitReply(cardId: string) {
   }
 }
 
+const errorType = ref<'none' | 'not_found' | 'network'>('none')
+
 async function fetchProject() {
   loading.value = true
   try {
@@ -277,9 +278,16 @@ async function fetchProject() {
     if (res.data.data.images && res.data.data.images.length > 0) {
       projectImages.value = res.data.data.images
     }
+    errorType.value = 'none'
   } catch (e: any) {
     console.error('获取项目失败:', e)
     project.value = null
+    // 区分 404 (项目不存在/链接失效) 和 网络错误
+    if (e?.response?.status === 404) {
+      errorType.value = 'not_found'
+    } else {
+      errorType.value = 'network'
+    }
   } finally {
     loading.value = false
   }
@@ -627,6 +635,7 @@ onMounted(() => {
     cursor: not-allowed;
   }
 }
+}
 
 .card-btns {
   display: flex;
@@ -675,10 +684,25 @@ onMounted(() => {
 .loading-state, .error-state {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 12px;
   font-size: 15px;
   color: $color-text-secondary;
+}
+
+.btn-retry {
+  padding: 8px 20px;
+  background: $color-primary;
+  color: #fff;
+  font-size: 14px;
+  border-radius: $radius-md;
+  transition: background 0.2s;
+
+  &:hover {
+    background: $color-primary-dark;
+  }
 }
 
 .confirm-bar {

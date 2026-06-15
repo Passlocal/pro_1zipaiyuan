@@ -16,12 +16,12 @@ export default defineConfig({
     strictPort: false,
     proxy: {
       '/v1': {
-        target: 'http://127.0.0.1:3001',
+        target: 'http://127.0.0.1:3000',
         changeOrigin: true,
         ws: true
       },
       '/uploads': {
-        target: 'http://127.0.0.1:3001',
+        target: 'http://127.0.0.1:3000',
         changeOrigin: true
       }
     }

@@ -23,8 +23,10 @@ const { WebSocketServer } = require('ws')
 // =============================================================================
 // Configuration
 // =============================================================================
-const PORT = parseInt(process.env.PORT, 10) || 3001
-const JWT_SECRET = process.env.JWT_SECRET || 'epicshot-prod-secret-' + require('crypto').randomBytes(32).toString('hex')
+const NODE_ENV = process.env.NODE_ENV || 'development'
+const IS_PROD = NODE_ENV === 'production'
+const PORT = parseInt(process.env.PORT, 10) || 3000
+const JWT_SECRET = process.env.JWT_SECRET || (IS_PROD ? (function() { throw new Error('FATAL: JWT_SECRET must be set in production') })() : 'epicshot-dev-secret-' + require('crypto').randomBytes(32).toString('hex'))
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d'
 const BCRYPT_ROUNDS = 12
 const DB_PATH = path.join(__dirname, 'data', 'epicshot.db')
@@ -33,10 +35,16 @@ const THUMBNAILS_DIR = path.join(UPLOADS_DIR, 'thumbnails')
 const MAX_FILE_SIZE = 50 * 1024 * 1024 // 50MB
 const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:5174').split(',')
 
+// HTTPS configuration
+const HTTPS_ENABLED = process.env.HTTPS_ENABLED === 'true' || IS_PROD
+const HTTPS_KEY_PATH = process.env.HTTPS_KEY_PATH || path.join(__dirname, 'certs', 'key.pem')
+const HTTPS_CERT_PATH = process.env.HTTPS_CERT_PATH || path.join(__dirname, 'certs', 'cert.pem')
+const HTTPS_PORT = parseInt(process.env.HTTPS_PORT, 10) || 3443
+
 // WeChat OAuth
 const WECHAT_APP_ID = process.env.WECHAT_APP_ID || ''
 const WECHAT_APP_SECRET = process.env.WECHAT_APP_SECRET || ''
-const WECHAT_REDIRECT_URI = process.env.WECHAT_REDIRECT_URI || 'http://localhost:3001/v1/auth/wechat/callback'
+const WECHAT_REDIRECT_URI = process.env.WECHAT_REDIRECT_URI || 'http://localhost:3000/v1/auth/wechat/callback'
 const WECHAT_OAUTH_URL = 'https://open.weixin.qq.com/connect/qrconnect'
 const WECHAT_API_BASE = 'https://api.weixin.qq.com'
 
@@ -51,17 +59,40 @@ const AI_SERVICE_URL = process.env.AI_SERVICE_URL || ''
 })
 
 // =============================================================================
-// Logger
+// Production-Grade Structured JSON Logger
 // =============================================================================
+const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 }
+const LOG_LEVEL = LOG_LEVELS[process.env.LOG_LEVEL || (IS_PROD ? 'INFO' : 'DEBUG')] || LOG_LEVELS.INFO
+
+// Generate a unique instance ID for this server process
+var INSTANCE_ID = require('crypto').randomBytes(6).toString('hex')
+
 function log(level, module, message, data) {
-  var timestamp = new Date().toISOString()
-  var entry = '[' + timestamp + '] [' + level + '] [' + module + '] ' + message
-  if (data) {
-    if (typeof data === 'string') entry += ' ' + data
-    else entry += ' ' + JSON.stringify(data)
+  var numericLevel = LOG_LEVELS[level] || LOG_LEVELS.INFO
+  if (numericLevel < LOG_LEVEL) return
+
+  var entry = {
+    ts: new Date().toISOString(),
+    level: level,
+    module: module,
+    msg: message,
+    instance: INSTANCE_ID
   }
-  if (level === 'ERROR') console.error(entry)
-  else console.log(entry)
+
+  if (data && typeof data === 'object') {
+    if (data instanceof Error) {
+      entry.error = data.message
+      entry.stack = IS_PROD ? undefined : data.stack
+    } else {
+      Object.assign(entry, data)
+    }
+  } else if (data) {
+    entry.detail = String(data)
+  }
+
+  var output = JSON.stringify(entry)
+  if (level === 'ERROR') console.error(output)
+  else console[level === 'WARN' ? 'warn' : 'log'](output)
 }
 
 // =============================================================================
@@ -218,16 +249,41 @@ seedIfEmpty()
 // =============================================================================
 const app = express()
 
-// Security headers
-app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }))
+// Request ID middleware — attach unique ID to every request
+app.use(function(req, res, next) {
+  req.id = req.headers['x-request-id'] || uuidv4()
+  res.setHeader('X-Request-ID', req.id)
+  req._startTime = Date.now()
+  next()
+})
 
-// CORS
+// Security headers — strict CSP in production
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+  contentSecurityPolicy: IS_PROD ? {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "blob:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"]
+    }
+  } : false
+}))
+
+// CORS — permissive in dev, origin-whitelist in production
 app.use(cors({
   origin: function(origin, cb) {
-    // Allow requests with no origin (server-to-server, curl, mobile apps)
     if (!origin) return cb(null, true)
-    if (ALLOWED_ORIGINS.indexOf(origin) !== -1) return cb(null, true)
-    cb(null, true) // In dev, allow all; restrict in production with env var
+    if (IS_PROD) {
+      if (ALLOWED_ORIGINS.indexOf(origin) !== -1) return cb(null, true)
+      return cb(new Error('Origin not allowed: ' + origin))
+    }
+    cb(null, true)
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']
@@ -256,9 +312,12 @@ const authLimiter = rateLimit({
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true, limit: '50mb' }))
 
-// Handle JSON parse errors gracefully
+// Handle JSON parse errors and unsupported content types gracefully
 app.use(function(err, req, res, next) {
   if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ code: 'INVALID_JSON', message: '请求体JSON格式无效' })
+  }
+  if (err.type === 'entity.parse.failed') {
     return res.status(400).json({ code: 'INVALID_JSON', message: '请求体JSON格式无效' })
   }
   next(err)
@@ -271,13 +330,19 @@ app.use('/uploads', express.static(UPLOADS_DIR, {
   lastModified: true
 }))
 
-// Request logging
+// Request logging — structured JSON with request ID
 app.use(function(req, res, next) {
   var start = Date.now()
   var origEnd = res.end
   res.end = function() {
     var duration = Date.now() - start
-    log('INFO', 'HTTP', req.method + ' ' + req.originalUrl, { status: res.statusCode, duration: duration + 'ms' })
+    log('INFO', 'HTTP', req.method + ' ' + req.originalUrl, {
+      status: res.statusCode,
+      duration_ms: duration,
+      reqId: req.id,
+      ip: req.ip,
+      ua: req.headers['user-agent'] ? req.headers['user-agent'].substring(0, 120) : undefined
+    })
     origEnd.apply(res, arguments)
   }
   next()
@@ -755,8 +820,10 @@ app.get('/v1/projects/:id', authMiddleware, function(req, res) {
 })
 
 app.post('/v1/projects', authMiddleware, function(req, res) {
+  if (!req.body || typeof req.body !== 'object') return res.status(400).json({ code: 'INVALID_JSON', message: '请求体JSON格式无效' })
   var name = (req.body.name || '').trim()
   if (!name) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '项目名称不能为空' })
+  if (name.length > 200) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '项目名称不能超过200个字符' })
 
   var id = uuidv4()
   var status = req.body.status
@@ -774,6 +841,7 @@ app.post('/v1/projects', authMiddleware, function(req, res) {
 })
 
 app.put('/v1/projects/:id', authMiddleware, function(req, res) {
+  if (!req.body || typeof req.body !== 'object') return res.status(400).json({ code: 'INVALID_JSON', message: '请求体JSON格式无效' })
   var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
   if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
 
@@ -784,7 +852,11 @@ app.put('/v1/projects/:id', authMiddleware, function(req, res) {
     db.prepare('INSERT INTO timeline_events (id,project_id,type,user_name,description) VALUES (?,?,?,?,?)')
       .run(uuidv4(), req.params.id, 'status_change', '系统', '项目状态变更：' + proj.status + ' -> ' + req.body.status)
   }
-  if (req.body.name) db.prepare('UPDATE projects SET name = ?, updated_at = datetime(\'now\') WHERE id = ?').run(req.body.name.trim(), req.params.id)
+  if (req.body.name) {
+    var name = (req.body.name || '').trim()
+    if (name.length > 200) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '项目名称不能超过200个字符' })
+    db.prepare('UPDATE projects SET name = ?, updated_at = datetime(\'now\') WHERE id = ?').run(name, req.params.id)
+  }
   if (req.body.clientName !== undefined) db.prepare('UPDATE projects SET client_name = ?, updated_at = datetime(\'now\') WHERE id = ?').run((req.body.clientName || '').trim(), req.params.id)
   if (req.body.deadline !== undefined) db.prepare("UPDATE projects SET deadline = ?, updated_at = datetime('now') WHERE id = ?").run(req.body.deadline, req.params.id)
 
@@ -1209,6 +1281,9 @@ app.post('/v1/ai/color-check', authMiddleware, function(req, res) {
   var projectId = req.body.projectId
   if (!projectId) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少 projectId' })
 
+  var proj = db.prepare('SELECT id FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
   var taskId = uuidv4()
   colorCheckTasks.set(taskId, projectId)
   // In production, analyze all images in the project using AI
@@ -1261,6 +1336,12 @@ app.get('/v1/ai/color-check/:taskId', authMiddleware, function(req, res) {
 // Import Routes
 // =============================================================================
 app.post('/v1/import/cloud-drive', authMiddleware, function(req, res) {
+  var projectId = req.body.projectId
+  if (!projectId) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少 projectId' })
+
+  var proj = db.prepare('SELECT id FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
   var provider = req.body.provider || 'local'
   var path_ = req.body.path || '/'
 
@@ -1304,6 +1385,9 @@ app.post('/v1/import/apply', authMiddleware, function(req, res) {
   var annotations = req.body.annotations
 
   if (!projectId || !Array.isArray(annotations)) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少必填字段' })
+
+  var proj = db.prepare('SELECT id FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
 
   var taskId = uuidv4()
   // In production, process the import asynchronously
@@ -1419,6 +1503,10 @@ app.use(function(err, req, res, next) {
     }
     return res.status(400).json({ code: 'UPLOAD_ERROR', message: err.message })
   }
+  // Multer fileFilter custom errors
+  if (err.message && err.message.startsWith('不支持的文件类型')) {
+    return res.status(400).json({ code: 'INVALID_FILE_TYPE', message: err.message })
+  }
   log('ERROR', 'Server', 'Unhandled error', { message: err.message, stack: err.stack, url: req.originalUrl })
   res.status(500).json({ code: 'SERVER_ERROR', message: '服务器内部错误' })
 })
@@ -1439,7 +1527,23 @@ fs.writeFileSync(path.join(UPLOADS_DIR, 'placeholder.svg'), svgLines.join('\n'))
 // =============================================================================
 // WebSocket Server (Collaboration)
 // =============================================================================
-var server = http.createServer(app)
+var server
+
+if (HTTPS_ENABLED) {
+  try {
+    var httpsOptions = {
+      key: fs.readFileSync(HTTPS_KEY_PATH),
+      cert: fs.readFileSync(HTTPS_CERT_PATH)
+    }
+    server = https.createServer(httpsOptions, app)
+    log('INFO', 'Server', 'HTTPS enabled with certs from ' + HTTPS_CERT_PATH)
+  } catch (e) {
+    log('WARN', 'Server', 'HTTPS cert not found, falling back to HTTP', { error: e.message })
+    server = http.createServer(app)
+  }
+} else {
+  server = http.createServer(app)
+}
 var wss = new WebSocketServer({ server: server, path: '/v1/ws' })
 
 // Track connected clients per project
@@ -1538,14 +1642,37 @@ wss.on('close', function() { clearInterval(heartbeatInterval) })
 // Start Server
 // =============================================================================
 server.listen(PORT, '0.0.0.0', function() {
-  log('INFO', 'Server', 'EpicShot API Server started', { port: PORT, db: DB_PATH })
-  log('INFO', 'Server', 'Admin: zhang@epicshot.com / admin123')
+  log('INFO', 'Server', 'EpicShot API Server started', {
+    port: PORT,
+    env: NODE_ENV,
+    https: HTTPS_ENABLED && server instanceof require('https').Server,
+    db: DB_PATH,
+    nodeVersion: process.version,
+    logLevel: process.env.LOG_LEVEL || (IS_PROD ? 'INFO' : 'DEBUG')
+  })
+
+  if (!IS_PROD) {
+    log('WARN', 'Server', 'DEV MODE — Admin: zhang@epicshot.com / admin123')
+  }
 
   if (!isRealWechat()) {
     log('WARN', 'Server', 'WeChat OAuth not configured — using demo mode')
   }
   if (!AI_SERVICE_URL) {
     log('INFO', 'Server', 'AI service not configured — using built-in fallback')
+  }
+
+  // Production safety checks
+  if (IS_PROD) {
+    if (!process.env.JWT_SECRET) {
+      log('ERROR', 'Server', 'JWT_SECRET not set in production! Server should not have started.')
+    }
+    if (ALLOWED_ORIGINS.length === 1 && ALLOWED_ORIGINS[0].indexOf('localhost') !== -1) {
+      log('WARN', 'Server', 'CORS allows localhost in production. Set CORS_ORIGINS to your production domains.')
+    }
+    if (process.env.HTTPS_ENABLED !== 'true') {
+      log('WARN', 'Server', 'HTTPS not enabled in production. Set HTTPS_ENABLED=true and provide certs.')
+    }
   }
 })
 

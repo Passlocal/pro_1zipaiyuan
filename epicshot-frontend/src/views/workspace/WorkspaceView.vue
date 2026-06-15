@@ -31,7 +31,7 @@
           </div>
         </div>
         <div class="info-row">
-          <label class="info-label">方案类型</label>
+          <label class="info-label">套餐类型</label>
           <span class="plan-badge" :class="'plan--' + (authStore.workspace?.planType || 'free')">
             {{ planLabel }}
           </span>

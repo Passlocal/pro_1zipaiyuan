@@ -10,13 +10,13 @@
 
       <form @submit.prevent="handleRegister">
         <div class="form-group">
-          <label class="form-label" for="reg-name">用户名</label>
+          <label class="form-label" for="reg-name">姓名</label>
           <input
             id="reg-name"
             v-model="name"
             type="text"
             class="form-input"
-            placeholder="请输入用户名"
+            placeholder="请输入姓名"
             required
           />
         </div>

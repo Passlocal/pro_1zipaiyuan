@@ -32,6 +32,15 @@ export interface ClientIdentity {
 // ============ 项目管理 ============
 export type ProjectStatus = 'draft' | 'review' | 'in_progress' | 'final_review' | 'completed' | 'archived'
 
+export const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
+  draft: '草稿',
+  review: '待确认',
+  in_progress: '修改中',
+  final_review: '待确稿',
+  completed: '已完成',
+  archived: '已归档',
+}
+
 export interface Project {
   id: string
   name: string

@@ -29,7 +29,7 @@
               placeholder="请输入密码"
               required
             />
-            <button type="button" class="toggle-pwd" @click="showPassword = !showPassword" :title="showPassword ? '隐藏密码' : '显示密码'">
+            <button type="button" class="toggle-pwd" @click="showPassword = !showPassword" :title="showPassword ? '隐藏密码' : '显示密码'" :aria-label="showPassword ? '隐藏密码' : '显示密码'">
               {{ showPassword ? '🙈' : '👁' }}
             </button>
           </div>

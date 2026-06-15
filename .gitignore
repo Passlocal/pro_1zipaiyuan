@@ -6,3 +6,11 @@ dist/
 *.log
 .DS_Store
 Thumbs.db
+
+# Runtime data
+epicshot-backend/data/
+epicshot-backend/uploads/originals/
+epicshot-backend/uploads/thumbnails/
+
+# Test artifacts
+epicshot-frontend/test-results/
