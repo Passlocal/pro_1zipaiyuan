@@ -1,10 +1,10 @@
 <template>
   <teleport to="body">
-    <transition-group name="toast" tag="div" class="toast-container">
-      <div v-for="toast in toasts" :key="toast.id" class="toast-item" :class="`toast-${toast.type}`">
+    <transition-group name="toast" tag="div" class="toast-container" aria-live="polite" role="status">
+      <div v-for="toast in toasts" :key="toast.id" class="toast-item" :class="`toast-${toast.type}`" role="alert">
         <span class="toast-icon">{{ iconMap[toast.type] }}</span>
         <span class="toast-message">{{ toast.message }}</span>
-        <button class="toast-dismiss" @click="removeToast(toast.id)">×</button>
+        <button class="toast-dismiss" @click="removeToast(toast.id)" aria-label="关闭通知">×</button>
       </div>
     </transition-group>
   </teleport>

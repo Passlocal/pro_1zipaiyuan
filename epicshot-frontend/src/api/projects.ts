@@ -1,24 +1,19 @@
 import client from './client'
 import type { ApiResponse, PaginatedResponse } from '@/types/api'
-import type { Project, ProjectCreateParams, ImageMedia, ProductUnit, ShareExpiry, TimelineNode } from '@/types/models'
+import type { Project, ProjectCreateParams, ImageMedia, ProductUnit, ShareExpiry, TimelineNode, CommentCard } from '@/types/models'
 
 export const projectApi = {
   getList: (params?: { status?: string; search?: string; page?: number }) =>
     client.get<PaginatedResponse<Project>>('/projects', { params }),
 
+  batchThumbnails: (projectIds: string[]) =>
+    client.post<ApiResponse<Record<string, string>>>('/projects/batch-thumbnails', { projectIds }),
+
   getDetail: (id: string) =>
     client.get<ApiResponse<Project>>(`/projects/${id}`),
 
-  create: (data: ProjectCreateParams, files?: File[]) => {
-    const formData = new FormData()
-    formData.append('data', JSON.stringify(data))
-    if (files) {
-      files.forEach((f) => formData.append('images', f))
-    }
-    return client.post<ApiResponse<Project>>('/projects', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    })
-  },
+  create: (data: ProjectCreateParams) =>
+    client.post<ApiResponse<Project>>('/projects', data),
 
   update: (id: string, data: Partial<Project>) =>
     client.put<ApiResponse<Project>>(`/projects/${id}`, data),
@@ -46,8 +41,8 @@ export const projectApi = {
 
   uploadImages: (productUnitId: string, files: File[]) => {
     const formData = new FormData()
-    files.forEach((f) => formData.append('images', f))
-    return client.post<ApiResponse<{ taskId: string }>>(`/units/${productUnitId}/images/batch`, formData, {
+    files.forEach((f) => formData.append('files', f))
+    return client.post<ApiResponse<ImageMedia[]>>(`/units/${productUnitId}/images`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' }
     })
   },
@@ -65,4 +60,10 @@ export const projectApi = {
 
   getClientProjects: () =>
     client.get<PaginatedResponse<Project>>('/client/me/projects'),
+
+  getByShareToken: (token: string) =>
+    client.get<ApiResponse<{ project: Project; cards: CommentCard[] }>>(`/share/${token}`),
+
+  submitCardReply: (cardId: string, reply: string) =>
+    client.put<ApiResponse<void>>(`/comment-cards/${cardId}`, { text: reply }),
 }

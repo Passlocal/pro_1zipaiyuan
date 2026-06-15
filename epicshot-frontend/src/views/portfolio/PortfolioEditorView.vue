@@ -134,7 +134,10 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { portfolioApi } from '@/api/ai'
 import { useAuthStore } from '@/stores/auth'
+import { useToast } from '@/composables/useToast'
 import type { PortfolioImage } from '@/types/models'
+
+const toast = useToast()
 
 const route = useRoute()
 const authStore = useAuthStore()
@@ -146,6 +149,7 @@ const saving = ref(false)
 const publishing = ref(false)
 
 const portfolioId = ref('')
+const portfolio = ref<any>(null)
 const clientName = ref('')
 const contactInfo = ref('')
 const portfolioImages = ref<PortfolioImage[]>([])
@@ -171,11 +175,15 @@ function onBgChange(e: Event) {
   const input = e.target as HTMLInputElement
   if (input.files?.[0]) {
     coverBgFile.value = input.files[0]
-    const reader = new FileReader()
-    reader.onload = () => {
-      coverBgPreview.value = reader.result as string
+    coverBgPreview.value = URL.createObjectURL(input.files[0])
+    // Upload immediately if portfolio exists
+    if (portfolioId.value) {
+      portfolioApi.uploadCover(portfolioId.value, input.files[0]).then(res => {
+        if (portfolio.value) portfolio.value.coverUrl = res.data.data.url
+      }).catch(err => {
+        console.error('封面上传失败:', err)
+      })
     }
-    reader.readAsDataURL(input.files[0])
   }
 }
 
@@ -198,15 +206,16 @@ async function generatePortfolio() {
   generating.value = true
   try {
     const res = await portfolioApi.generate(projectId.value)
-    // 轮询或等待任务完成后获取 portfolio
-    // const taskId = res.data.data.taskId
-    // 模拟后续加载
     const portfolioRes = await portfolioApi.get(projectId.value)
-    const portfolio = portfolioRes.data.data
-    portfolioId.value = portfolio.id
-    clientName.value = portfolio.clientName || clientName.value
-    contactInfo.value = portfolio.contactInfo || contactInfo.value
-    portfolioImages.value = portfolio.images || []
+    const p = portfolioRes.data.data
+    portfolio.value = p
+    portfolioId.value = p.id
+    clientName.value = p.clientName || clientName.value
+    contactInfo.value = p.contactInfo || contactInfo.value
+    portfolioImages.value = p.images || []
+  } catch (e: any) {
+    console.error('生成作品集失败:', e)
+    toast.error('生成失败: ' + (e?.response?.data?.message || e?.message || '请稍后重试'))
   } finally {
     generating.value = false
   }
@@ -219,31 +228,48 @@ async function savePortfolio() {
     await portfolioApi.update(portfolioId.value, {
       images: portfolioImages.value,
       contactInfo: contactInfo.value,
-      coverUrl: coverBgPreview.value || undefined,
+      clientName: clientName.value,
+      coverUrl: portfolio.value?.coverUrl || undefined,
     })
+    toast.success('保存成功')
+  } catch (e: any) {
+    console.error('保存失败:', e)
+    toast.error('保存失败: ' + (e?.response?.data?.message || e?.message || '请稍后重试'))
   } finally {
     saving.value = false
   }
 }
 
 async function publishPortfolio() {
+  if (!confirm('确认发布作品集？发布后客户将可以查看。')) return
   publishing.value = true
   try {
-    await savePortfolio()
+    await portfolioApi.update(portfolioId.value!, {
+      images: portfolioImages.value,
+      contactInfo: contactInfo.value,
+      clientName: clientName.value,
+      coverUrl: portfolio.value?.coverUrl || undefined,
+      isPublished: true,
+    })
+    if (portfolio.value) portfolio.value.isPublished = true
+    toast.success('发布成功')
+  } catch (e: any) {
+    console.error('发布失败:', e)
+    toast.error('发布失败: ' + (e?.response?.data?.message || e?.message || '请稍后重试'))
   } finally {
     publishing.value = false
   }
 }
 
 onMounted(() => {
-  // 尝试加载已有 portfolio
   portfolioApi.get(projectId.value).then((res) => {
-    const portfolio = res.data.data
-    if (portfolio) {
-      portfolioId.value = portfolio.id
-      clientName.value = portfolio.clientName
-      contactInfo.value = portfolio.contactInfo
-      portfolioImages.value = portfolio.images || []
+    const p = res.data.data
+    if (p) {
+      portfolio.value = p
+      portfolioId.value = p.id
+      clientName.value = p.clientName
+      contactInfo.value = p.contactInfo
+      portfolioImages.value = p.images || []
     }
   }).catch(() => { /* 尚未生成 */ })
 })

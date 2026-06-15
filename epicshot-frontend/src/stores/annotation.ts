@@ -1,13 +1,14 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { annotationApi } from '@/api/annotations'
+import { useAuthStore } from '@/stores/auth'
 import type { Annotation, AnnotationCreateParams, AnnotationToolType, AnnotationColor, PenWidth, ArrowWidth, FontSize, RelativeCoord, CommentCard, CardStatusAction } from '@/types/models'
 import { generateId } from '@/utils/id'
-import { mockAnnotations, mockCommentCards } from '@/utils/mockData'
 
 export const useAnnotationStore = defineStore('annotation', () => {
   const annotations = ref<Annotation[]>([])
   const commentCards = ref<CommentCard[]>([])
+  const currentImageId = ref<string>('')
   const activeTool = ref<AnnotationToolType>('pen')
   const activeColor = ref<AnnotationColor>('#FF0000')
   const activeWidth = ref<PenWidth | ArrowWidth>(3)
@@ -16,27 +17,15 @@ export const useAnnotationStore = defineStore('annotation', () => {
   const redoStack = ref<Annotation[][]>([])
   const maxHistory = 50
 
-  function setTool(tool: AnnotationToolType) {
-    activeTool.value = tool
-  }
-
-  function setColor(color: AnnotationColor) {
-    activeColor.value = color
-  }
-
-  function setWidth(width: PenWidth | ArrowWidth) {
-    activeWidth.value = width
-  }
-
-  function setFontSize(size: FontSize) {
-    activeFontSize.value = size
-  }
+  function setTool(tool: AnnotationToolType) { activeTool.value = tool }
+  function setColor(color: AnnotationColor) { activeColor.value = color }
+  function setWidth(width: PenWidth | ArrowWidth) { activeWidth.value = width }
+  function setFontSize(size: FontSize) { activeFontSize.value = size }
+  function setCurrentImageId(id: string) { currentImageId.value = id }
 
   function pushUndo() {
     undoStack.value.push([...annotations.value.map(a => ({ ...a }))])
-    if (undoStack.value.length > maxHistory) {
-      undoStack.value.shift()
-    }
+    if (undoStack.value.length > maxHistory) undoStack.value.shift()
     redoStack.value = []
   }
 
@@ -60,8 +49,8 @@ export const useAnnotationStore = defineStore('annotation', () => {
     pushUndo()
     const annotation: Annotation = {
       id: generateId(),
-      imageId: '',
-      userId: '',
+      imageId: currentImageId.value,
+      userId: useAuthStore().user?.id || '',
       toolType: params.toolType,
       coordinates: params.coordinates,
       style: params.style,
@@ -70,13 +59,22 @@ export const useAnnotationStore = defineStore('annotation', () => {
       createdAt: new Date().toISOString()
     }
     annotations.value.push(annotation)
+    // Persist to backend
+    if (currentImageId.value) {
+      annotationApi.create(currentImageId.value, params).then(res => {
+        const idx = annotations.value.findIndex(a => a.id === annotation.id)
+        if (idx !== -1) annotations.value[idx] = { ...annotations.value[idx], ...res.data.data, id: res.data.data.id || annotation.id }
+      }).catch(err => console.error('[annotation] persist failed:', err))
+    }
     return annotation
   }
 
   function updateAnnotation(id: string, updates: Partial<Annotation>) {
     const idx = annotations.value.findIndex(a => a.id === id)
     if (idx !== -1) {
+      pushUndo()
       annotations.value[idx] = { ...annotations.value[idx], ...updates }
+      annotationApi.update(id, updates).catch(() => {})
     }
   }
 
@@ -84,6 +82,7 @@ export const useAnnotationStore = defineStore('annotation', () => {
     pushUndo()
     annotations.value = annotations.value.filter(a => a.id !== id)
     commentCards.value = commentCards.value.filter(c => c.annotationId !== id)
+    annotationApi.delete(id).catch(() => {})
   }
 
   function getAnnotationById(id: string) {
@@ -91,41 +90,22 @@ export const useAnnotationStore = defineStore('annotation', () => {
   }
 
   async function loadAnnotations(imageId: string) {
-    try {
-      const res = await annotationApi.getByImage(imageId)
-      annotations.value = res.data.data
-    } catch {
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        annotations.value = mockAnnotations(imageId)
-      }
-    }
+    const res = await annotationApi.getByImage(imageId)
+    annotations.value = res.data.data
   }
 
   async function loadCommentCards(imageId: string) {
-    try {
-      const res = await annotationApi.getCardsByImage(imageId)
-      commentCards.value = res.data.data
-    } catch {
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        commentCards.value = mockCommentCards(imageId, annotations.value)
-      }
-    }
+    const res = await annotationApi.getCardsByImage(imageId)
+    commentCards.value = res.data.data
   }
 
-  function addCommentCard(card: CommentCard) {
-    commentCards.value.push(card)
-  }
-
-  function removeCommentCard(id: string) {
-    commentCards.value = commentCards.value.filter(c => c.id !== id)
-  }
+  function addCommentCard(card: CommentCard) { commentCards.value.push(card) }
+  function removeCommentCard(id: string) { commentCards.value = commentCards.value.filter(c => c.id !== id) }
 
   async function updateCardStatus(cardId: string, action: CardStatusAction) {
     await annotationApi.updateCardStatus(cardId, action)
     const card = commentCards.value.find(c => c.id === cardId)
-    if (card) {
-      card.status = action === 'resolve' ? 'resolved' : 'unresolved'
-    }
+    if (card) card.status = action === 'resolve' ? 'resolved' : 'unresolved'
   }
 
   function updateCardsOrder(ids: string[]) {
@@ -137,7 +117,6 @@ export const useAnnotationStore = defineStore('annotation', () => {
     commentCards.value = ordered
   }
 
-  // Canvas坐标转换工具
   function toScreenCoord(rel: RelativeCoord, imgWidth: number, imgHeight: number) {
     return {
       x: rel.x * imgWidth,
@@ -157,31 +136,11 @@ export const useAnnotationStore = defineStore('annotation', () => {
   }
 
   return {
-    annotations,
-    commentCards,
-    activeTool,
-    activeColor,
-    activeWidth,
-    activeFontSize,
-    undoStack,
-    redoStack,
-    setTool,
-    setColor,
-    setWidth,
-    setFontSize,
-    undo,
-    redo,
-    addAnnotation,
-    updateAnnotation,
-    removeAnnotation,
-    getAnnotationById,
-    loadAnnotations,
-    loadCommentCards,
-    addCommentCard,
-    removeCommentCard,
-    updateCardStatus,
-    updateCardsOrder,
-    toScreenCoord,
-    toRelativeCoord
+    annotations, commentCards, currentImageId, activeTool, activeColor, activeWidth, activeFontSize,
+    undoStack, redoStack,
+    setTool, setColor, setWidth, setFontSize, setCurrentImageId,
+    undo, redo, addAnnotation, updateAnnotation, removeAnnotation, getAnnotationById,
+    loadAnnotations, loadCommentCards, addCommentCard, removeCommentCard,
+    updateCardStatus, updateCardsOrder, toScreenCoord, toRelativeCoord
   }
 })

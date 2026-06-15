@@ -2,7 +2,6 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { projectApi } from '@/api/projects'
 import type { Project, ProjectStatus, ProductUnit, ImageMedia, TimelineNode, ShareExpiry } from '@/types/models'
-import { mockProjects, mockProductUnits, mockImages, mockTimeline, mockColorCheckReport } from '@/utils/mockData'
 
 export const useProjectStore = defineStore('project', () => {
   const projects = ref<Project[]>([])
@@ -18,11 +17,6 @@ export const useProjectStore = defineStore('project', () => {
     try {
       const res = await projectApi.getList(params)
       projects.value = res.data.data
-    } catch {
-      // Fall back to mock data when no backend
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        projects.value = mockProjects()
-      }
     } finally {
       loading.value = false
     }
@@ -33,11 +27,6 @@ export const useProjectStore = defineStore('project', () => {
     try {
       const res = await projectApi.getDetail(id)
       currentProject.value = res.data.data
-    } catch {
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        const all = mockProjects()
-        currentProject.value = all.find(p => p.id === id) || all[0]
-      }
     } finally {
       loading.value = false
     }
@@ -49,30 +38,31 @@ export const useProjectStore = defineStore('project', () => {
     return res.data.data
   }
 
-  function updateProjectStatus(id: string, status: ProjectStatus) {
-    return projectApi.update(id, { status })
+  async function updateProjectStatus(id: string, status: ProjectStatus) {
+    const res = await projectApi.update(id, { status })
+    if (currentProject.value && currentProject.value.id === id) {
+      currentProject.value.status = status
+    }
+    const idx = projects.value.findIndex(p => p.id === id)
+    if (idx !== -1) projects.value[idx] = { ...projects.value[idx], status }
+    return res
   }
 
   async function fetchProductUnits(projectId: string) {
-    try {
-      const res = await projectApi.getProductUnits(projectId)
-      productUnits.value = res.data.data
-    } catch {
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        productUnits.value = mockProductUnits(projectId)
-      }
-    }
+    const res = await projectApi.getProductUnits(projectId)
+    productUnits.value = res.data.data
+  }
+
+  async function createProductUnit(projectId: string, name: string) {
+    const res = await projectApi.createProductUnit(projectId, name)
+    // Refresh units list
+    await fetchProductUnits(projectId)
+    return res.data.data
   }
 
   async function fetchImages(unitId: string) {
-    try {
-      const res = await projectApi.getImages(unitId)
-      currentImages.value = res.data.data
-    } catch {
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        currentImages.value = mockImages(unitId)
-      }
-    }
+    const res = await projectApi.getImages(unitId)
+    currentImages.value = res.data.data
   }
 
   async function generateShare(projectId: string, expiry: ShareExpiry) {
@@ -80,22 +70,12 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   async function fetchTimeline(projectId: string) {
-    try {
-      const res = await projectApi.getTimeline(projectId)
-      timeline.value = res.data.data
-    } catch {
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        timeline.value = mockTimeline(projectId)
-      }
-    }
+    const res = await projectApi.getTimeline(projectId)
+    timeline.value = res.data.data
   }
 
   function setCurrentImage(image: ImageMedia | null) {
     currentImage.value = image
-  }
-
-  function getMockColorCheckReport() {
-    return mockColorCheckReport()
   }
 
   const projectName = computed(() => (currentProject.value as any)?.name || currentProject.value?.clientName || '')
@@ -114,10 +94,10 @@ export const useProjectStore = defineStore('project', () => {
     createProject,
     updateProjectStatus,
     fetchProductUnits,
+    createProductUnit,
     fetchImages,
     generateShare,
     fetchTimeline,
-    setCurrentImage,
-    getMockColorCheckReport
+    setCurrentImage
   }
 })

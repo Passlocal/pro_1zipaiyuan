@@ -29,15 +29,15 @@ export const aiApi = {
 }
 
 export const importApi = {
-  parseCloudDrive: (url: string, password?: string) =>
-    client.post<ApiResponse<{ files: { name: string; path: string; size: number; type: string }[] }>>('/import/cloud-drive', { url, password }),
+  parseCloudDrive: (provider?: string, path?: string) =>
+    client.post<ApiResponse<{ files: { name: string; path: string; size: number; type: string }[] }>>('/import/cloud-drive', { provider: provider || 'local', path: path || '/' }),
 
   applyImport: (projectId: string, paths: string[]) =>
     client.post<ApiResponse<{ taskId: string }>>('/import/apply', { projectId, paths }),
 
   uploadScreenshot: (file: File, originalImageId?: string) => {
     const formData = new FormData()
-    formData.append('screenshot', file)
+    formData.append('file', file)
     if (originalImageId) formData.append('originalImageId', originalImageId)
     return client.post<ApiResponse<{
       annotations: { coordinates: { x: number; y: number; w: number; h: number }; text: string; confidence: number }[]
@@ -54,9 +54,17 @@ export const portfolioApi = {
   get: (id: string) =>
     client.get<ApiResponse<Portfolio>>(`/portfolios/${id}`),
 
-  update: (id: string, data: { coverUrl?: string; images?: PortfolioImage[]; contactInfo?: string }) =>
+  update: (id: string, data: { name?: string; description?: string; coverUrl?: string; images?: PortfolioImage[]; contactInfo?: string; clientName?: string }) =>
     client.put<ApiResponse<Portfolio>>(`/portfolios/${id}`, data),
 
   getStats: (id: string) =>
-    client.get<ApiResponse<{ views: number; avgDuration: number }>>(`/portfolios/${id}/stats`)
+    client.get<ApiResponse<{ views: number; avgDuration: number }>>(`/portfolios/${id}/stats`),
+
+  uploadCover: (id: string, file: File) => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return client.post<ApiResponse<{ url: string }>>(`/portfolios/${id}/cover`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    })
+  }
 }

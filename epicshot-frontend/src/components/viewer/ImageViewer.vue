@@ -134,6 +134,13 @@ const currentMouseX = ref(0)
 const currentMouseY = ref(0)
 let isSpacePanning = false
 
+// Annotation selection & move
+const selectedAnnotationId = ref<string | null>(null)
+const isMovingAnnotation = ref(false)
+const moveStartRel = ref({ x: 0, y: 0 })
+const moveStartScreen = ref({ x: 0, y: 0 })
+const moveAnnotationStartCoords = ref<{ x: number; y: number; w?: number; h?: number } | null>(null)
+
 const showTextInput = ref(false)
 const textInputValue = ref('')
 const textInputPos = ref({ x: 0, y: 0 })
@@ -177,10 +184,23 @@ const textInputStyle = computed(() => ({
 
 // ============ Lifecycle ============
 
+let resizeObserver: ResizeObserver | null = null
+
 onMounted(() => {
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('keyup', onGlobalKeyup)
   startRenderLoop()
+
+  // ResizeObserver: re-fit image when container size changes
+  if (containerRef.value) {
+    resizeObserver = new ResizeObserver(() => {
+      if (!containerRef.value || !imageLoaded.value) return
+      const rect = containerRef.value.getBoundingClientRect()
+      viewer.fitToScreen(naturalWidth.value, naturalHeight.value, rect.width, rect.height)
+      triggerRender()
+    })
+    resizeObserver.observe(containerRef.value)
+  }
 })
 
 onUnmounted(() => {
@@ -188,6 +208,10 @@ onUnmounted(() => {
   window.removeEventListener('keyup', onGlobalKeyup)
   stopRenderLoop()
   viewer.cancelInertia()
+  if (resizeObserver) {
+    resizeObserver.disconnect()
+    resizeObserver = null
+  }
 })
 
 watch(() => props.annotations, () => {
@@ -291,6 +315,12 @@ function renderAnnotations(): void {
     drawAnnotation(ctx, annotation)
   }
 
+  // Draw selection border for selected annotation
+  if (selectedAnnotationId.value) {
+    const ann = props.annotations.find(a => a.id === selectedAnnotationId.value)
+    if (ann) drawSelectionBorder(ctx, ann)
+  }
+
   // Current pen stroke preview
   if (isDrawing.value && currentStroke.length > 1 && props.activeTool === 'pen') {
     drawStrokePreview(ctx)
@@ -391,6 +421,51 @@ function drawAnnotation(ctx: CanvasRenderingContext2D, annotation: Annotation): 
     }
   }
 
+  ctx.restore()
+}
+
+function drawSelectionBorder(ctx: CanvasRenderingContext2D, annotation: Annotation): void {
+  const { x, y, w, h } = annotation.coordinates
+  const sW = displayWidth.value
+  const sH = displayHeight.value
+
+  ctx.save()
+  ctx.strokeStyle = '#4a9eff'
+  ctx.lineWidth = 2
+  ctx.setLineDash([6, 3])
+  ctx.lineDashOffset = 0
+
+  if (annotation.toolType === 'pen' && annotation.strokeData) {
+    // Draw bounding box around pen stroke
+    const pts = annotation.strokeData
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+    for (const pt of pts) {
+      if (pt[0] < minX) minX = pt[0]
+      if (pt[0] > maxX) maxX = pt[0]
+      if (pt[1] < minY) minY = pt[1]
+      if (pt[1] > maxY) maxY = pt[1]
+    }
+    const pad = 0.01
+    ctx.strokeRect(
+      (minX - pad) * sW, (minY - pad) * sH,
+      (maxX - minX + pad * 2) * sW, (maxY - minY + pad * 2) * sH
+    )
+  } else if (annotation.toolType === 'arrow' && w !== undefined && h !== undefined) {
+    const endX = (x + w) * sW
+    const endY = (y + h) * sH
+    const startX = x * sW
+    const startY = y * sH
+    const pad = 8
+    const minX = Math.min(startX, endX) - pad
+    const minY = Math.min(startY, endY) - pad
+    ctx.strokeRect(minX, minY, Math.abs(w * sW) + pad * 2, Math.abs(h * sH) + pad * 2)
+  } else if (annotation.toolType === 'text') {
+    ctx.strokeRect(x * sW - 4, y * sH - 4, 0.15 * sW + 8, 0.03 * sH + 8)
+  } else if (w !== undefined && h !== undefined) {
+    ctx.strokeRect(x * sW - 4, y * sH - 4, w * sW + 8, h * sH + 8)
+  }
+
+  ctx.setLineDash([])
   ctx.restore()
 }
 
@@ -500,6 +575,25 @@ function onStageMouseDown(event: MouseEvent): void {
   }
 
   const pos = getCanvasPos(event.clientX, event.clientY)
+  const rel = toRelative(pos.x, pos.y)
+
+  // Check if clicking on an existing annotation (select/move)
+  const hitAnnotation = findAnnotationAt(rel.x, rel.y)
+  if (hitAnnotation && props.activeTool !== 'eraser') {
+    selectAnnotation(hitAnnotation.id)
+    isMovingAnnotation.value = true
+    moveStartRel.value = { x: rel.x, y: rel.y }
+    moveStartScreen.value = { x: event.clientX, y: event.clientY }
+    moveAnnotationStartCoords.value = { ...hitAnnotation.coordinates }
+    triggerRender()
+    return
+  }
+
+  // Deselect on empty space click
+  if (!hitAnnotation) {
+    selectedAnnotationId.value = null
+    triggerRender()
+  }
 
   if (props.activeTool === 'pen') {
     isDrawing.value = true
@@ -528,7 +622,36 @@ function onStageMouseMove(event: MouseEvent): void {
     return
   }
 
-  if (!imageLoaded.value || !isDrawing.value) return
+  // Annotation move
+  if (isMovingAnnotation.value && moveAnnotationStartCoords.value) {
+    const pos = getCanvasPos(event.clientX, event.clientY)
+    const rel = toRelative(pos.x, pos.y)
+    const dx = rel.x - moveStartRel.value.x
+    const dy = rel.y - moveStartRel.value.y
+    const start = moveAnnotationStartCoords.value
+    const ann = props.annotations.find(a => a.id === selectedAnnotationId.value)
+    if (ann) {
+      const newCoords = { x: start.x + dx, y: start.y + dy }
+      if (start.w !== undefined) newCoords['w'] = start.w
+      if (start.h !== undefined) newCoords['h'] = start.h
+      store.updateAnnotation(ann.id, { coordinates: newCoords as any })
+      triggerRender()
+    }
+    return
+  }
+
+  if (!imageLoaded.value || !isDrawing.value) {
+    // Show move cursor when hovering over annotation
+    if (!isSpacePanning) {
+      const pos = getCanvasPos(event.clientX, event.clientY)
+      const rel = toRelative(pos.x, pos.y)
+      const hovering = findAnnotationAt(rel.x, rel.y)
+      if (containerRef.value) {
+        containerRef.value.style.cursor = hovering ? 'move' : props.activeTool === 'eraser' ? 'crosshair' : 'crosshair'
+      }
+    }
+    return
+  }
 
   const pos = getCanvasPos(event.clientX, event.clientY)
 
@@ -544,6 +667,13 @@ function onStageMouseMove(event: MouseEvent): void {
 function onStageMouseUp(event: MouseEvent): void {
   if (isSpacePanning && viewer.isPanning()) {
     viewer.handleMouseUp(true)
+    return
+  }
+
+  if (isMovingAnnotation.value) {
+    isMovingAnnotation.value = false
+    moveAnnotationStartCoords.value = null
+    triggerRender()
     return
   }
 
@@ -652,6 +782,21 @@ function finalizeText(): void {
 function cancelText(): void {
   showTextInput.value = false
   textInputValue.value = ''
+}
+
+// ============ Annotation Selection ============
+
+function findAnnotationAt(rx: number, ry: number): Annotation | undefined {
+  for (let i = props.annotations.length - 1; i >= 0; i--) {
+    if (hitTestAnnotation(props.annotations[i], rx, ry)) {
+      return props.annotations[i]
+    }
+  }
+  return undefined
+}
+
+function selectAnnotation(id: string): void {
+  selectedAnnotationId.value = id
 }
 
 // ============ Eraser ============
@@ -763,6 +908,24 @@ function toggleZoom(): void {
 // ============ Keyboard ============
 
 function handleKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Escape') {
+    if (selectedAnnotationId.value) {
+      selectedAnnotationId.value = null
+      triggerRender()
+      event.preventDefault()
+      return
+    }
+  }
+  if (event.key === 'Delete' || event.key === 'Backspace') {
+    if (selectedAnnotationId.value) {
+      store.removeAnnotation(selectedAnnotationId.value)
+      emit('annotation-deleted', selectedAnnotationId.value)
+      selectedAnnotationId.value = null
+      triggerRender()
+      event.preventDefault()
+      return
+    }
+  }
   if (event.key === 'ArrowLeft') {
     event.preventDefault()
     emit('prev')
@@ -773,17 +936,30 @@ function handleKeydown(event: KeyboardEvent): void {
     event.preventDefault()
     viewer.toggleFullscreen()
     emit('fullscreen-toggle', viewer.isFullscreen.value)
+  } else if (event.key === '+' || event.key === '=') {
+    event.preventDefault()
+    viewer.zoomIn(1.25)
+  } else if (event.key === '-' || event.key === '_') {
+    event.preventDefault()
+    viewer.zoomOut(1.25)
+  } else if (event.key === '0') {
+    event.preventDefault()
+    viewer.resetView()
   }
 }
 
 function onGlobalKeydown(event: KeyboardEvent): void {
   if (event.code === 'Space' && !event.repeat) {
-    event.preventDefault()
-    isSpacePanning = true
-    if (containerRef.value) {
-      containerRef.value.style.cursor = 'grab'
+    // Only intercept space if the container or its children are focused
+    const el = document.activeElement
+    if (el && (el === containerRef.value || containerRef.value?.contains(el))) {
+      event.preventDefault()
+      isSpacePanning = true
+      if (containerRef.value) {
+        containerRef.value.style.cursor = 'grab'
+      }
+      return
     }
-    return
   }
 
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'z') {

@@ -1,7 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { authApi } from '@/api/auth'
-import { mockUser, mockWorkspace, mockMembers } from '@/utils/mockData'
 import type { User, Workspace } from '@/types/models'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -10,108 +9,80 @@ export const useAuthStore = defineStore('auth', () => {
   const members = ref<User[]>([])
   const token = ref<string | null>(localStorage.getItem('epx_token'))
 
-  // Sync init: mock mode fills user immediately so router guard passes
-  function initMockDataIfNeeded() {
-    if (!(import.meta.env.VITE_API_URL as string) && !token.value) {
-      token.value = 'mock-token'
-      user.value = mockUser()
-      workspace.value = mockWorkspace()
-      members.value = mockMembers()
-      localStorage.setItem('epx_token', 'mock-token')
-    }
-  }
-  initMockDataIfNeeded()
-
   const isLoggedIn = computed(() => !!token.value && !!user.value)
   const isOwner = computed(() => user.value?.role === 'owner')
   const isEditor = computed(() => user.value?.role === 'editor')
 
-  async function loginWithWechat(code: string) {
-    const res = await authApi.loginWithWechat(code)
+  async function loginWithWechatPreflight() {
+    const qrRes = await authApi.getWechatQrcode()
+    return {
+      ticket: qrRes.data.data.ticket,
+      qrcodeDataUrl: qrRes.data.data.qrcodeDataUrl
+    }
+  }
+
+  async function loginWithWechat() {
+    const qrRes = await authApi.getWechatQrcode()
+    const ticket = qrRes.data.data.ticket
+    const qrcodeDataUrl = qrRes.data.data.qrcodeDataUrl
+
+    return new Promise<{ ticket: string; qrcodeDataUrl: string }>((resolve, reject) => {
+      const pollInterval = setInterval(async () => {
+        try {
+          const statusRes = await authApi.getWechatStatus(ticket)
+          const status = statusRes.data.data.status
+
+          if (status === 'confirmed') {
+            clearInterval(pollInterval)
+            const confirmRes = await authApi.confirmWechatQrcode(ticket)
+            token.value = confirmRes.data.data.token
+            user.value = confirmRes.data.data.user
+            localStorage.setItem('epx_token', confirmRes.data.data.token)
+            await loadWorkspace()
+            resolve({ ticket, qrcodeDataUrl })
+          } else if (status === 'expired') {
+            clearInterval(pollInterval)
+            reject(new Error('二维码已过期，请刷新'))
+          }
+        } catch (e: any) {
+          if (e?.response?.status === 404) {
+            clearInterval(pollInterval)
+            reject(new Error('二维码已过期，请刷新'))
+          }
+        }
+      }, 2000)
+
+      setTimeout(() => {
+        clearInterval(pollInterval)
+        reject(new Error('二维码已过期，请刷新'))
+      }, 5 * 60 * 1000)
+    })
+  }
+
+  async function loginWithEmail(email: string, password: string) {
+    const res = await authApi.loginWithEmail(email, password)
     token.value = res.data.data.token
     user.value = res.data.data.user
     localStorage.setItem('epx_token', res.data.data.token)
     await loadWorkspace()
   }
 
-  async function loginWithEmail(email: string, password: string) {
-    try {
-      const res = await authApi.loginWithEmail(email, password)
-      token.value = res.data.data.token
-      user.value = res.data.data.user
-      localStorage.setItem('epx_token', res.data.data.token)
-      await loadWorkspace()
-    } catch (e: any) {
-      // Mock mode: accept any credentials
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        mockLogin(email)
-      } else {
-        const msg = e?.response?.data?.message || e?.message || '登录失败'
-        console.error('[loginWithEmail] status:', e?.response?.status, 'data:', e?.response?.data, 'message:', e?.message)
-        throw new Error(msg)
-      }
-    }
-  }
-
   async function register(email: string, password: string, name: string) {
-    try {
-      const res = await authApi.register(email, password, name)
-      token.value = res.data.data.token
-      user.value = res.data.data.user
-      localStorage.setItem('epx_token', res.data.data.token)
-      await loadWorkspace()
-    } catch {
-      // Mock mode: register locally
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        const newUser: User = {
-          id: 'mock-user-' + Date.now(),
-          name,
-          email,
-          workspaceId: 'mock-workspace-1',
-          role: 'owner' as const,
-          avatarUrl: '',
-          status: 'active' as const,
-          createdAt: new Date().toISOString()
-        }
-        token.value = 'mock-token-' + Date.now()
-        user.value = newUser
-        workspace.value = mockWorkspace()
-        members.value = [newUser, ...mockMembers()]
-        localStorage.setItem('epx_token', token.value)
-      } else {
-        throw new Error('注册失败')
-      }
-    }
-  }
-
-  function mockLogin(email: string) {
-    const mocked = mockUser()
-    mocked.email = email
-    token.value = 'mock-token-' + Date.now()
-    user.value = mocked
-    workspace.value = mockWorkspace()
-    members.value = mockMembers()
-    localStorage.setItem('epx_token', token.value)
+    const res = await authApi.register(email, password, name)
+    token.value = res.data.data.token
+    user.value = res.data.data.user
+    localStorage.setItem('epx_token', res.data.data.token)
+    await loadWorkspace()
   }
 
   async function fetchUser() {
-    // Double-guard: skip on guest pages to avoid 401 redirect loop
-    const path = window.location.pathname
-    if (path === '/login' || path === '/register') {
-      console.log('[fetchUser] skipped on guest page:', path)
-      return
-    }
+    if (!token.value) return
     try {
       const res = await authApi.getMe()
       user.value = res.data.data
       await loadWorkspace()
     } catch {
-      // Fall back to mock data when no backend configured
-      if (!(import.meta.env.VITE_API_URL as string)) {
-        initMockData()
-      } else {
-        logout()
-      }
+      logout()
     }
   }
 
@@ -119,24 +90,26 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const res = await authApi.getWorkspace()
       workspace.value = res.data.data
+      const membersRes = await authApi.getMembers()
+      members.value = membersRes.data.data
     } catch {
       // ignore
     }
-  }
-
-  function initMockData() {
-    token.value = 'mock-token'
-    user.value = mockUser()
-    workspace.value = mockWorkspace()
-    members.value = mockMembers()
-    localStorage.setItem('epx_token', 'mock-token')
   }
 
   function logout() {
     token.value = null
     user.value = null
     workspace.value = null
+    members.value = []
     localStorage.removeItem('epx_token')
+  }
+
+  function injectToken(newToken: string, newUser: User) {
+    token.value = newToken
+    user.value = newUser
+    localStorage.setItem('epx_token', newToken)
+    loadWorkspace().catch(() => {})
   }
 
   return {
@@ -146,12 +119,13 @@ export const useAuthStore = defineStore('auth', () => {
     isLoggedIn,
     isOwner,
     isEditor,
+    loginWithWechatPreflight,
     loginWithWechat,
     loginWithEmail,
     register,
     fetchUser,
     logout,
     members,
-    initMockData
+    injectToken
   }
 })

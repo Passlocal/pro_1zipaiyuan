@@ -3,8 +3,18 @@ import type { ApiResponse } from '@/types/api'
 import type { User, Workspace } from '@/types/models'
 
 export const authApi = {
-  loginWithWechat: (code: string) =>
-    client.post<ApiResponse<{ token: string; user: User }>>('/auth/wechat', { code }),
+  // WeChat QR code login
+  getWechatQrcode: () =>
+    client.get<ApiResponse<{ ticket: string; qrcodeDataUrl: string; expiresIn: number }>>('/auth/wechat/qrcode'),
+
+  getWechatStatus: (ticket: string) =>
+    client.get<ApiResponse<{ status: 'pending' | 'scanned' | 'confirmed' | 'expired' }>>(`/auth/wechat/status/${ticket}`),
+
+  scanWechatQrcode: (ticket: string) =>
+    client.post<ApiResponse<{ status: string }>>(`/auth/wechat/scan/${ticket}`),
+
+  confirmWechatQrcode: (ticket: string) =>
+    client.post<ApiResponse<{ token: string; user: User }>>(`/auth/wechat/confirm/${ticket}`),
 
   loginWithEmail: (email: string, password: string) =>
     client.post<ApiResponse<{ token: string; user: User }>>('/auth/login', { email, password }),

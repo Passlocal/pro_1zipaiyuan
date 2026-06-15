@@ -12,7 +12,7 @@
           <span v-if="checking" class="spinner"></span>
           {{ checking ? '巡检中...' : '一键巡检' }}
         </button>
-        <button class="btn-export" v-if="report" :disabled="exporting">
+        <button class="btn-export" v-if="report" :disabled="exporting" @click="exportPdf">
           导出PDF
         </button>
       </div>
@@ -27,9 +27,16 @@
     </div>
 
     <!-- 空状态 -->
-    <div v-if="!report && !checking" class="empty-state">
+    <div v-if="!report && !checking && !checkError" class="empty-state">
       <span class="empty-icon">🔍</span>
       <p>点击"一键巡检"开始分析组图色差</p>
+    </div>
+
+    <!-- 错误状态 -->
+    <div v-if="checkError && !checking" class="error-state">
+      <span class="error-icon">⚠️</span>
+      <p>巡检失败，请检查网络后重试</p>
+      <button class="btn-retry" @click="checkError = false; runCheck()">重新巡检</button>
     </div>
 
     <!-- 结果列表 -->
@@ -71,7 +78,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { aiApi } from '@/api/ai'
 import { useProjectStore } from '@/stores/project'
@@ -87,6 +94,7 @@ const exporting = ref(false)
 const progress = ref(0)
 const report = ref<ColorCheckReport | null>(null)
 const ignoredIds = ref<Set<string>>(new Set())
+const checkError = ref(false)
 
 let progressTimer: ReturnType<typeof setInterval> | null = null
 
@@ -108,51 +116,54 @@ function ignoreItem(imageId: string) {
   ignoredIds.value.add(imageId)
 }
 
+function exportPdf() {
+  exporting.value = true
+  setTimeout(() => {
+    window.print()
+    exporting.value = false
+  }, 100)
+}
+
+let aborted = false
+
 async function runCheck() {
   if (checking.value || !projectId.value) return
-
-  const apiUrl = (import.meta.env.VITE_API_URL as string) || ''
-  if (!apiUrl) {
-    // Use mock data
-    const mockReport = projectStore.getMockColorCheckReport()
-    report.value = mockReport as unknown as ColorCheckReport
-    progress.value = 100
-    return
-  }
 
   checking.value = true
   progress.value = 0
   report.value = null
+  checkError.value = false
   ignoredIds.value = new Set()
+  aborted = false
 
-  // 模拟进度
+  const startTime = Date.now()
+  const MAX_DURATION = 90_000 // 90s timeout
+
+  // Progress based on elapsed time (not random)
   progressTimer = setInterval(() => {
-    if (progress.value < 90) {
-      progress.value += Math.floor(Math.random() * 15) + 5
-      if (progress.value > 90) progress.value = 90
+    const elapsed = Date.now() - startTime
+    if (elapsed >= MAX_DURATION) {
+      progress.value = 100
+      return
     }
-  }, 500)
+    // Logarithmic progress: fast start, slows down near 90%
+    const p = Math.min(90, Math.round(30 * Math.log2(1 + elapsed / 3000)))
+    progress.value = Math.max(progress.value, p)
+  }, 800)
 
   try {
     const res = await aiApi.runColorCheck(projectId.value)
     const taskId = res.data.data.taskId
 
-    // 轮询获取结果
-    const pollResult = async (): Promise<ColorCheckReport> => {
-      const result = await aiApi.getColorCheckResult(taskId)
-      return result.data.data
-    }
-
-    // 简单轮询
-    let result: ColorCheckReport | null = null
+    let result = null
     let attempts = 0
-    while (attempts < 30) {
+    while (attempts < 45 && !aborted) { // 45 × 2s = 90s timeout, abort on unmount
       await new Promise((r) => setTimeout(r, 2000))
       attempts++
       try {
-        const r = await pollResult()
-        if (r && r.items) {
-          result = r
+        const r = await aiApi.getColorCheckResult(taskId)
+        if (r.data.data && r.data.data.items) {
+          result = r.data.data
           break
         }
       } catch {
@@ -160,37 +171,23 @@ async function runCheck() {
       }
     }
 
-    if (result) {
-      report.value = result
-      progress.value = 100
-    } else {
-      // fallback: mock data
-      report.value = {
-        id: taskId,
-        projectId: projectId.value,
-        totalImages: 12,
-        abnormalCount: 5,
-        items: [],
-        createdAt: new Date().toISOString(),
-      }
-      progress.value = 100
-    }
-  } catch {
-    // fallback mock data
-    report.value = {
-      id: 'mock',
-      projectId: projectId.value,
-      totalImages: 12,
-      abnormalCount: 5,
-      items: [],
-      createdAt: new Date().toISOString(),
-    }
+    report.value = result || { id: taskId, projectId: projectId.value, totalImages: 0, abnormalCount: 0, items: [], createdAt: new Date().toISOString() }
+    progress.value = 100
+    if (!result) checkError.value = true
+  } catch (err: any) {
+    console.error('[ColorCheck] Error:', err)
+    checkError.value = true
     progress.value = 100
   } finally {
     if (progressTimer) clearInterval(progressTimer)
     checking.value = false
   }
 }
+
+onUnmounted(() => {
+  aborted = true
+  if (progressTimer) clearInterval(progressTimer)
+})
 </script>
 
 <style lang="scss" scoped>
@@ -343,6 +340,37 @@ async function runCheck() {
 
   p {
     font-size: 15px;
+  }
+}
+
+.error-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: $color-text-secondary;
+
+  .error-icon {
+    font-size: 48px;
+  }
+
+  p {
+    font-size: 15px;
+  }
+}
+
+.btn-retry {
+  padding: 8px 20px;
+  background: $color-primary;
+  color: #fff;
+  font-size: 14px;
+  border-radius: $radius-md;
+  transition: background 0.2s;
+
+  &:hover {
+    background: $color-primary-dark;
   }
 }
 

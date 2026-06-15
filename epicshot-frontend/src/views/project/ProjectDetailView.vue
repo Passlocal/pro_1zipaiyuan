@@ -6,7 +6,7 @@
         <button class="btn-back" @click="router.back()">
           <span>← 返回</span>
         </button>
-        <h1 class="project-name">{{ (projectStore.currentProject as any)?.name || projectStore.currentProject?.clientName || '项目详情' }}</h1>
+        <h1 class="project-name">{{ projectStore.currentProject?.name || projectStore.currentProject?.clientName || '项目详情' }}</h1>
         <span
           v-if="projectStore.currentProject"
           class="status-badge"
@@ -16,16 +16,13 @@
         </span>
       </div>
       <div class="topbar-right">
-        <button class="btn-toolbar" title="分享">
+        <button class="btn-toolbar" title="分享" @click="handleShare">
           <span>🔗</span> 分享
         </button>
-        <button class="btn-toolbar" title="AI样片">
+        <button class="btn-toolbar" title="AI样片" @click="router.push(`/project/${projectId}/color-check`)">
           <span>✨</span> AI样片
         </button>
-        <button class="btn-toolbar" title="一键巡检" @click="router.push(`/project/${projectId}/color-check`)">
-          <span>🔍</span> 一键巡检
-        </button>
-        <button class="btn-toolbar" title="导出意见">
+        <button class="btn-toolbar" title="导出意见" @click="handleExportComments">
           <span>📥</span> 导出意见
         </button>
         <button class="btn-toolbar" title="作品集" @click="router.push(`/project/${projectId}/portfolio`)">
@@ -39,14 +36,42 @@
 
     <!-- 主体区域 -->
     <div class="detail-body">
+      <!-- 加载中 -->
+      <div v-if="projectLoading" class="loading-state">
+        <span class="loading-pulse">加载中...</span>
+      </div>
+      <!-- 加载失败 -->
+      <div v-else-if="projectError" class="error-state">
+        <span>⚠️</span>
+        <p>{{ projectError }}</p>
+        <button class="btn-retry" @click="loadProject">重新加载</button>
+      </div>
+      <!-- 正常内容 -->
+      <template v-else>
       <!-- 左侧：图片查看器 -->
       <div class="viewer-panel">
-        <div class="image-viewer">
+        <ImageViewer
+          v-if="currentImage"
+          :image-url="currentImageUrl"
+          :annotations="annotationStore.annotations"
+          :active-tool="annotationStore.activeTool"
+          :active-color="annotationStore.activeColor"
+          :active-width="annotationStore.activeWidth"
+          :active-font-size="annotationStore.activeFontSize"
+          @prev="navigateImage(-1)"
+          @next="navigateImage(1)"
+          @annotation-created="onAnnotationCreated"
+          @annotation-deleted="onAnnotationDeleted"
+        />
+        <div v-else class="image-viewer">
           <div class="viewer-placeholder">
             <span class="viewer-icon">🖼️</span>
             <p>图片查看器</p>
             <p class="viewer-hint" v-if="currentUnitImages.length === 0">
               请先在右侧选择一个产品单元查看图片
+            </p>
+            <p class="viewer-hint" v-else>
+              请点击右侧图片缩略图开始查看
             </p>
           </div>
         </div>
@@ -115,8 +140,21 @@
               {{ unit.name }}
             </button>
           </div>
-          <button class="btn-add-unit" title="添加产品单元">+</button>
-        </div>
+          <button class="btn-add-unit" title="添加产品单元" @click="showAddUnit = true">+</button>
+          </div>
+          <div v-if="showAddUnit" class="add-unit-form">
+            <input
+              ref="addUnitInputRef"
+              v-model="newUnitName"
+              type="text"
+              class="form-input form-input--sm"
+              placeholder="输入单元名称"
+              @keydown.enter="handleAddUnit"
+              @keydown.escape="cancelAddUnit"
+            />
+            <button class="btn-confirm" @click="handleAddUnit" :disabled="!newUnitName.trim()">确定</button>
+            <button class="btn-cancel" @click="cancelAddUnit">取消</button>
+          </div>
 
         <!-- 图片缩略图条 -->
         <div class="thumbnail-strip" v-if="currentUnitImages.length > 0">
@@ -154,23 +192,36 @@
             <div class="card-content">
               <p class="card-text">{{ card.text }}</p>
             </div>
-            <div class="card-status-dot" :class="card.status === 'resolved' ? 'dot-resolved' : 'dot-unresolved'"></div>
+            <div class="card-status-dot"
+              :class="card.status === 'resolved' ? 'dot-resolved' : 'dot-unresolved'"
+              :title="card.status === 'resolved' ? '标记为未解决' : '标记为已解决'"
+              @click.stop="toggleCardStatus(card)"
+            ></div>
           </div>
         </div>
         <div v-else class="comment-empty">
           <span>暂无意见卡片</span>
         </div>
       </aside>
+      </template>
+    </div>
+
+    <!-- Toast -->
+    <div v-if="toastMsg" class="toast" :class="toastType === 'error' ? 'toast--error' : 'toast--success'">
+      {{ toastMsg }}
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import { useAnnotationStore } from '@/stores/annotation'
-import type { ProjectStatus, AnnotationToolType, AnnotationColor, PenWidth, ArrowWidth, ImageMedia, CommentCard } from '@/types/models'
+import { annotationApi } from '@/api/annotations'
+import { projectApi } from '@/api/projects'
+import ImageViewer from '@/components/viewer/ImageViewer.vue'
+import type { ProjectStatus, AnnotationToolType, AnnotationColor, PenWidth, ArrowWidth, ImageMedia, CommentCard, Annotation } from '@/types/models'
 
 const router = useRouter()
 const route = useRoute()
@@ -180,6 +231,37 @@ const annotationStore = useAnnotationStore()
 const projectId = computed(() => route.params.id as string)
 const activeUnitId = ref<string>('')
 const focusedCardId = ref<string>('')
+const toastMsg = ref('')
+const toastType = ref<'success' | 'error'>('success')
+const projectLoading = ref(false)
+const projectError = ref('')
+const showAddUnit = ref(false)
+const newUnitName = ref('')
+const addUnitInputRef = ref<HTMLInputElement | null>(null)
+
+function cancelAddUnit() {
+  showAddUnit.value = false
+  newUnitName.value = ''
+}
+
+async function loadProject() {
+  projectLoading.value = true
+  projectError.value = ''
+  try {
+    await projectStore.fetchProject(projectId.value)
+    await projectStore.fetchProductUnits(projectId.value)
+  } catch (e: any) {
+    projectError.value = e?.response?.data?.message || e?.message || '项目加载失败'
+  } finally {
+    projectLoading.value = false
+  }
+}
+
+function showToast(msg: string, type: 'success' | 'error' = 'success') {
+  toastMsg.value = msg
+  toastType.value = type
+  setTimeout(() => { toastMsg.value = '' }, 3000)
+}
 
 const statusLabelMap: Record<ProjectStatus, string> = {
   draft: '草稿',
@@ -187,6 +269,7 @@ const statusLabelMap: Record<ProjectStatus, string> = {
   in_progress: '修改中',
   final_review: '待确稿',
   completed: '已完成',
+  archived: '已归档',
 }
 
 function statusLabel(status: ProjectStatus): string {
@@ -207,32 +290,125 @@ const widths: (PenWidth | ArrowWidth)[] = [3, 5, 10]
 
 async function selectUnit(unitId: string) {
   activeUnitId.value = unitId
-  await projectStore.fetchImages(unitId)
+  try {
+    await projectStore.fetchImages(unitId)
+  } catch (e) {
+    showToast('加载图片失败', 'error')
+  }
 }
 
 function selectImage(img: ImageMedia) {
   projectStore.setCurrentImage(img)
-  annotationStore.loadAnnotations(img.id)
-  annotationStore.loadCommentCards(img.id)
+  annotationStore.setCurrentImageId(img.id)
+  try {
+    annotationStore.loadAnnotations(img.id)
+    annotationStore.loadCommentCards(img.id)
+  } catch (e) {
+    // Non-critical: image still viewable without annotations
+  }
 }
 
 function focusCard(card: CommentCard) {
   focusedCardId.value = card.id
 }
 
+async function toggleCardStatus(card: CommentCard) {
+  const action = card.status === 'resolved' ? 'unresolve' : 'resolve'
+  try {
+    await annotationApi.updateCardStatus(card.id, action)
+    // Reload comment cards to reflect the change
+    if (projectStore.currentImage) {
+      annotationStore.loadCommentCards(projectStore.currentImage.id)
+    }
+  } catch (e) {
+    showToast('状态更新失败', 'error')
+  }
+}
+
 const currentUnitImages = computed(() => projectStore.currentImages)
+const currentImage = computed(() => projectStore.currentImage)
+
+const currentImageUrl = computed(() => {
+  const img = currentImage.value
+  if (!img) return ''
+  // Use the 600px thumbnail for display, fallback to original
+  const thumbs = img.thumbnailUrls || []
+  if (thumbs.length >= 2) return thumbs[1] // 600px
+  if (thumbs.length >= 1) return thumbs[0] // 200px thumb
+  return img.originalUrl || ''
+})
+
+function navigateImage(direction: number) {
+  const images = currentUnitImages.value
+  if (images.length === 0) return
+  const cur = currentImage.value
+  if (!cur) { selectImage(images[0]); return }
+  const idx = images.findIndex((i: ImageMedia) => i.id === cur.id)
+  const newIdx = (idx + direction + images.length) % images.length
+  selectImage(images[newIdx])
+}
+
+function onAnnotationCreated(_annotation: Annotation) {
+  // Annotation is already persisted in store.addAnnotation
+}
+
+function onAnnotationDeleted(_id: string) {
+  // Annotation is already removed in store.removeAnnotation
+}
+
+async function handleShare() {
+  try {
+    const res = await projectApi.generateShare(projectId.value, '7days')
+    const code = res.data.data?.shareCode || res.data.data?.code || ''
+    const shareUrl = `${window.location.origin}/client/project/${code}`
+    await navigator.clipboard.writeText(shareUrl)
+    showToast('分享链接已复制到剪贴板', 'success')
+  } catch (e) {
+    console.error('分享失败:', e)
+    showToast('分享失败，请稍后重试', 'error')
+  }
+}
+
+async function handleExportComments() {
+  try {
+    const res = await annotationApi.exportComments(projectId.value)
+    const blob = new Blob([JSON.stringify(res.data, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `comments-${projectId.value}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e) {
+    console.error('导出失败:', e)
+    showToast('导出失败，请稍后重试', 'error')
+  }
+}
+
+async function handleAddUnit() {
+  const name = newUnitName.value.trim()
+  if (!name) return
+  try {
+    await projectStore.createProductUnit(projectId.value, name)
+    newUnitName.value = ''
+    showAddUnit.value = false
+    showToast('添加成功', 'success')
+  } catch (e) {
+    console.error('添加单元失败:', e)
+    showToast('添加失败，请稍后重试', 'error')
+  }
+}
 
 watch(projectId, (id) => {
   if (id) {
-    projectStore.fetchProject(id)
-    projectStore.fetchProductUnits(id)
+    loadProject()
   }
 }, { immediate: true })
 
-onMounted(() => {
-  if (projectId.value) {
-    projectStore.fetchProject(projectId.value)
-    projectStore.fetchProductUnits(projectId.value)
+watch(showAddUnit, (val) => {
+  if (val) {
+    newUnitName.value = '新拍摄单元'
+    setTimeout(() => addUnitInputRef.value?.focus(), 50)
   }
 })
 </script>
@@ -326,6 +502,45 @@ onMounted(() => {
   flex: 1;
   display: flex;
   overflow: hidden;
+}
+
+.loading-state {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: $color-text-secondary;
+  font-size: 14px;
+  background: #1a1a2e;
+}
+
+.error-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: $color-text-secondary;
+  background: #1a1a2e;
+
+  p {
+    font-size: 15px;
+    color: $color-error;
+  }
+
+  .btn-retry {
+    padding: 8px 20px;
+    background: $color-primary;
+    color: #fff;
+    font-size: 14px;
+    border-radius: $radius-md;
+    transition: background 0.2s;
+
+    &:hover {
+      background: $color-primary-dark;
+    }
+  }
 }
 
 .viewer-panel {
@@ -537,6 +752,49 @@ onMounted(() => {
   }
 }
 
+.add-unit-form {
+  display: flex;
+  gap: 6px;
+  padding: 8px 0;
+
+  .form-input--sm {
+    flex: 1;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid $color-border;
+    border-radius: $radius-sm;
+    font-size: 13px;
+    outline: none;
+
+    &:focus {
+      border-color: $color-primary;
+    }
+  }
+
+  .btn-confirm {
+    padding: 4px 12px;
+    background: $color-primary;
+    color: #fff;
+    font-size: 13px;
+    border-radius: $radius-sm;
+
+    &:disabled {
+      opacity: 0.5;
+    }
+  }
+
+  .btn-cancel {
+    padding: 4px 8px;
+    font-size: 13px;
+    color: $color-text-muted;
+    border-radius: $radius-sm;
+
+    &:hover {
+      color: $color-text;
+    }
+  }
+}
+
 .thumbnail-strip {
   display: flex;
   gap: 6px;
@@ -688,5 +946,32 @@ onMounted(() => {
   justify-content: center;
   font-size: 13px;
   color: $color-text-muted;
+}
+
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 24px;
+  border-radius: $radius-md;
+  font-size: 14px;
+  z-index: 2000;
+  animation: fadeIn 0.3s ease;
+
+  &--success {
+    background: $color-success;
+    color: #fff;
+  }
+
+  &--error {
+    background: $color-error;
+    color: #fff;
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 </style>

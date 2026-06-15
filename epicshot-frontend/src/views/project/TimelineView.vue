@@ -7,7 +7,7 @@
         </button>
         <h1 class="page-title">修改溯源时间轴</h1>
       </div>
-      <button class="btn-export">导出PDF报告</button>
+      <button class="btn-export" @click="handleExportPdf">导出PDF报告</button>
     </div>
 
     <div v-if="projectStore.loading" class="loading-state">
@@ -18,9 +18,30 @@
       <p>暂无时间轴记录</p>
     </div>
     <div v-else class="timeline-container">
+
+      <!-- 日期筛选栏 -->
+      <div class="date-filter-bar">
+        <div class="date-filter-group">
+          <label class="date-label">从</label>
+          <input type="date" v-model="dateFrom" class="date-input" />
+        </div>
+        <div class="date-filter-group">
+          <label class="date-label">到</label>
+          <input type="date" v-model="dateTo" class="date-input" />
+        </div>
+        <button
+          v-if="dateFrom || dateTo"
+          class="date-clear-btn"
+          @click="clearDateFilter"
+        >重置</button>
+        <span class="date-filter-count" v-if="filteredTimeline.length !== projectStore.timeline.length">
+          筛选结果：{{ filteredTimeline.length }} / {{ projectStore.timeline.length }} 条
+        </span>
+      </div>
+
       <div class="timeline-line"></div>
       <div
-        v-for="(node, index) in projectStore.timeline"
+        v-for="(node, index) in filteredTimeline"
         :key="node.id"
         class="timeline-node"
         :class="{ 'node-left': index % 2 === 0, 'node-right': index % 2 !== 0 }"
@@ -123,9 +144,38 @@ const route = useRoute()
 const projectStore = useProjectStore()
 
 const projectId = computed(() => route.params.id as string)
+
+function handleExportPdf() {
+  // 导出时间线为PDF - 打印当前页面
+  window.print()
+}
+
 const showComparison = ref(false)
 const selectedRevision = ref<TimelineNode | null>(null)
 const overlayValue = ref(50)
+
+// Date range filter
+const dateFrom = ref('')
+const dateTo = ref('')
+
+const filteredTimeline = computed(() => {
+  let items = projectStore.timeline
+  if (dateFrom.value) {
+    const from = new Date(dateFrom.value)
+    items = items.filter(e => new Date(e.timestamp) >= from)
+  }
+  if (dateTo.value) {
+    const to = new Date(dateTo.value)
+    to.setDate(to.getDate() + 1)
+    items = items.filter(e => new Date(e.timestamp) <= to)
+  }
+  return items
+})
+
+function clearDateFilter() {
+  dateFrom.value = ''
+  dateTo.value = ''
+}
 
 const avatarColors = ['#1a73e8', '#34a853', '#ea4335', '#fbbc04', '#8e24aa', '#00acc1', '#f4511e', '#43a047']
 
@@ -253,6 +303,61 @@ onMounted(() => {
   overflow-y: auto;
   padding: 40px 24px;
   position: relative;
+}
+
+.date-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 0 16px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid $color-border-light;
+}
+
+.date-filter-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.date-label {
+  font-size: 13px;
+  color: $color-text-secondary;
+  font-weight: 500;
+}
+
+.date-input {
+  padding: 4px 8px;
+  font-size: 13px;
+  border: 1px solid $color-border;
+  border-radius: $radius-sm;
+  color: $color-text;
+  background: $color-surface;
+  outline: none;
+
+  &:focus {
+    border-color: $color-primary;
+  }
+}
+
+.date-clear-btn {
+  font-size: 12px;
+  color: $color-primary;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  font-weight: 500;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.date-filter-count {
+  font-size: 12px;
+  color: $color-text-muted;
+  margin-left: auto;
 }
 
 .timeline-line {

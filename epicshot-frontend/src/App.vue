@@ -1,24 +1,29 @@
 <template>
+  <Toast ref="globalToast" />
   <router-view />
 </template>
 
 <script setup lang="ts">
-import { onMounted } from 'vue'
+import { ref, provide, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import { useRouter, useRoute } from 'vue-router'
+import { useRoute } from 'vue-router'
+import Toast from '@/components/common/Toast.vue'
 
 const auth = useAuthStore()
-const router = useRouter()
 const route = useRoute()
+const globalToast = ref<InstanceType<typeof Toast> | null>(null)
+
+function toast() {
+  return globalToast.value!
+}
+provide('globalToast', toast)
 
 onMounted(async () => {
-  // Skip fetchUser on guest pages (login/register) to avoid 401 redirect loop
-  console.log('[App] onMounted, path:', route.path, 'meta:', route.meta)
-  if (route.meta.guest) {
-    console.log('[App] guest page, skipping fetchUser')
-    return
+  if (route.meta.guest) return
+  try {
+    await auth.fetchUser()
+  } catch {
+    // Token expired or network error — router guard will redirect to /login
   }
-  console.log('[App] calling fetchUser')
-  await auth.fetchUser()
 })
 </script>

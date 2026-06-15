@@ -24,21 +24,21 @@
     <div class="main-area" v-if="project">
       <!-- 图片查看器 -->
       <div class="viewer-area">
-        <div class="image-viewer">
-          <div class="viewer-placeholder">
-            <span class="viewer-icon">🖼️</span>
-            <p>图片查看区域</p>
+        <div class="image-viewer" v-if="currentImageUrl">
+          <img
+            :src="currentImageUrl"
+            alt="项目图片"
+            class="viewer-image"
+          />
+          <div v-if="projectImages.length > 1" class="image-counter">
+            {{ currentImageIndex + 1 }} / {{ projectImages.length }}
           </div>
+          <button v-if="currentImageIndex > 0" class="nav-btn nav-prev" @click="currentImageIndex--">◀</button>
+          <button v-if="currentImageIndex < projectImages.length - 1" class="nav-btn nav-next" @click="currentImageIndex++">▶</button>
         </div>
-        <!-- 标注工具栏 -->
-        <div class="anno-toolbar">
-          <span class="toolbar-label">标注工具</span>
-          <div class="toolbar-btns">
-            <button class="tool-btn"><span>🖌️</span></button>
-            <button class="tool-btn"><span>⬜</span></button>
-            <button class="tool-btn"><span>↗️</span></button>
-            <button class="tool-btn"><span>💬</span></button>
-          </div>
+        <div v-else class="viewer-placeholder">
+          <span class="viewer-icon">🖼️</span>
+          <p>暂无图片</p>
         </div>
       </div>
 
@@ -67,12 +67,21 @@
               <p class="card-text">{{ card.text }}</p>
             </div>
             <div class="card-actions">
-              <textarea
-                v-model="cardReplies[card.id]"
-                class="card-reply-input"
-                placeholder="输入反馈文字..."
-                rows="2"
-              ></textarea>
+              <div class="card-reply-row">
+                <textarea
+                  v-model="cardReplies[card.id]"
+                  class="card-reply-input"
+                  placeholder="输入反馈文字..."
+                  rows="2"
+                ></textarea>
+                <button
+                  class="btn-reply-submit"
+                  :disabled="!cardReplies[card.id]?.trim() || replySubmitting[card.id]"
+                  @click="submitReply(card.id)"
+                >
+                  {{ replySubmitting[card.id] ? '...' : '发送' }}
+                </button>
+              </div>
               <div class="card-btns">
                 <button
                   class="btn-card"
@@ -109,12 +118,48 @@
     <!-- 底部确认栏 -->
     <div v-if="project && cards.length > 0" class="confirm-bar">
       <button
-        class="btn-confirm-all"
+        class="btn-preview-confirm"
         :disabled="confirming"
-        @click="confirmAll"
+        @click="showPreviewModal = true"
       >
-        {{ confirming ? '提交中...' : '全部确稿' }}
+        全部确稿
       </button>
+    </div>
+
+    <!-- 确稿前预览弹窗 -->
+    <div v-if="showPreviewModal" class="modal-overlay" @click.self="showPreviewModal = false">
+      <div class="modal-content preview-modal">
+        <h3 class="modal-title">确稿确认</h3>
+        <p class="modal-desc">请确认以下意见处理结果后点击「确认确稿」</p>
+
+        <div class="preview-list">
+          <div v-for="(card, idx) in cards" :key="card.id" class="preview-item">
+            <span class="preview-index">#{{ idx + 1 }}</span>
+            <span class="preview-text">{{ card.text }}</span>
+            <span
+              class="preview-state"
+              :class="cardStates[card.id] === 'confirmed' ? 'state-confirmed' : 'state-modify'"
+            >
+              {{ cardStates[card.id] === 'confirmed' ? '已确认' : '待修改' }}
+            </span>
+          </div>
+        </div>
+
+        <p class="modal-warning" v-if="pendingCount > 0">
+          还有 {{ pendingCount }} 条意见未标记确认
+        </p>
+
+        <div class="modal-actions">
+          <button class="btn-cancel" @click="showPreviewModal = false">返回修改</button>
+          <button
+            class="btn-confirm"
+            :disabled="confirming"
+            @click="confirmAll"
+          >
+            {{ confirming ? '提交中...' : '确认确稿' }}
+          </button>
+        </div>
+      </div>
     </div>
 
     <!-- 确稿成功弹窗 -->
@@ -132,7 +177,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import type { Project, CommentCard, ProjectStatus } from '@/types/models'
+import { projectApi } from '@/api/projects'
+import { useToast } from '@/composables/useToast'
+import type { Project, CommentCard, ImageMedia, ProjectStatus } from '@/types/models'
+
+const toast = useToast()
 
 const route = useRoute()
 const router = useRouter()
@@ -140,9 +189,17 @@ const router = useRouter()
 const shareToken = computed(() => route.params.shareToken as string)
 const project = ref<Project | null>(null)
 const cards = ref<CommentCard[]>([])
+const projectImages = ref<ImageMedia[]>([])
+const currentImageIndex = ref(0)
 const loading = ref(true)
 const confirming = ref(false)
 const showCompleteModal = ref(false)
+const showPreviewModal = ref(false)
+const replySubmitting = ref<Record<string, boolean>>({})
+
+const pendingCount = computed(() => {
+  return cards.value.filter(c => cardStates.value[c.id] !== 'confirmed').length
+})
 
 const cardReplies = ref<Record<string, string>>({})
 const cardStates = ref<Record<string, 'confirmed' | 'modify' | null>>({})
@@ -153,6 +210,7 @@ const statusLabelMap: Record<ProjectStatus, string> = {
   in_progress: '修改中',
   final_review: '待确稿',
   completed: '已完成',
+  archived: '已归档',
 }
 
 const statusLabel = computed(() => {
@@ -168,8 +226,16 @@ const progressPercent = computed(() => {
     in_progress: 55,
     final_review: 80,
     completed: 100,
+    archived: 100,
   }
   return map[project.value.status] || 0
+})
+
+const currentImageUrl = computed(() => {
+  if (projectImages.value.length > 0) {
+    return projectImages.value[currentImageIndex.value]?.thumbnailUrl || projectImages.value[currentImageIndex.value]?.url || ''
+  }
+  return project.value?.thumbnailUrl || ''
 })
 
 function formatDate(iso: string): string {
@@ -179,36 +245,57 @@ function formatDate(iso: string): string {
 
 function toggleCardState(cardId: string, state: 'confirmed' | 'modify') {
   cardStates.value[cardId] = cardStates.value[cardId] === state ? null : state
+  // Persist to sessionStorage so it survives refresh
+  try {
+    sessionStorage.setItem('client_card_states', JSON.stringify(cardStates.value))
+  } catch { /* ignore */ }
+}
+
+async function submitReply(cardId: string) {
+  const reply = cardReplies.value[cardId]
+  if (!reply?.trim()) return
+  replySubmitting.value[cardId] = true
+  try {
+    await projectApi.submitCardReply(cardId, reply.trim())
+    cardReplies.value[cardId] = ''
+    toast.success('回复已提交')
+  } catch (e: any) {
+    console.error('提交反馈失败:', e)
+    toast.error('提交失败: ' + (e?.response?.data?.message || e?.message || '请稍后重试'))
+  } finally {
+    replySubmitting.value[cardId] = false
+  }
 }
 
 async function fetchProject() {
-  // 项目通过 share_token 由 API client 拦截器自动附加
-  // 此处模拟数据，实际应从 API 获取
   loading.value = true
   try {
-    // 实际调用: projectApi.getByShareToken(shareToken.value)
-    // 由于项目结构中没有专门的方法，此处模拟一个占位
-    project.value = {
-      id: '',
-      workspaceId: '',
-      clientName: '示例项目',
-      status: 'final_review',
-      pendingCount: 3,
-      recentActivity: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+    const res = await projectApi.getByShareToken(shareToken.value)
+    project.value = res.data.data.project
+    cards.value = res.data.data.cards
+    // Load project images
+    if (res.data.data.images && res.data.data.images.length > 0) {
+      projectImages.value = res.data.data.images
     }
-    cards.value = []
+  } catch (e: any) {
+    console.error('获取项目失败:', e)
+    project.value = null
   } finally {
     loading.value = false
   }
 }
 
 async function confirmAll() {
+  showPreviewModal.value = false
   confirming.value = true
   try {
-    // await projectApi.completeProject(project.value!.id)
+    if (project.value) {
+      await projectApi.completeProject(project.value.id)
+    }
     showCompleteModal.value = true
+  } catch (e: any) {
+    console.error('确稿失败:', e)
+    toast.error('确稿失败: ' + (e?.response?.data?.message || e?.message || '请稍后重试'))
   } finally {
     confirming.value = false
   }
@@ -216,10 +303,15 @@ async function confirmAll() {
 
 function goToDownload() {
   showCompleteModal.value = false
-  router.push('/client/assets')
+  router.push(`/client/assets?token=${shareToken.value}`)
 }
 
 onMounted(() => {
+  // Restore card states from sessionStorage
+  try {
+    const saved = sessionStorage.getItem('client_card_states')
+    if (saved) cardStates.value = JSON.parse(saved)
+  } catch { /* ignore */ }
   fetchProject()
 })
 </script>
@@ -336,7 +428,41 @@ onMounted(() => {
   align-items: center;
   justify-content: center;
   background: #1a1a2e;
+  position: relative;
 }
+
+.image-counter {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  padding: 4px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+}
+
+.nav-btn {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+
+  &:hover { background: rgba(0, 0, 0, 0.7); }
+}
+
+.nav-prev { left: 12px; }
+.nav-next { right: 12px; }
 
 .viewer-placeholder {
   text-align: center;
@@ -353,41 +479,10 @@ onMounted(() => {
   }
 }
 
-.anno-toolbar {
-  height: 44px;
-  background: $color-surface;
-  border-top: 1px solid $color-border;
-  display: flex;
-  align-items: center;
-  padding: 0 16px;
-  gap: 12px;
-  flex-shrink: 0;
-}
-
-.toolbar-label {
-  font-size: 12px;
-  color: $color-text-muted;
-  font-weight: 500;
-}
-
-.toolbar-btns {
-  display: flex;
-  gap: 4px;
-}
-
-.tool-btn {
-  width: 32px;
-  height: 32px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: $radius-sm;
-  font-size: 14px;
-  transition: background 0.15s;
-
-  &:hover {
-    background: $color-surface-hover;
-  }
+.viewer-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
 }
 
 .bottom-panel {
@@ -487,8 +582,13 @@ onMounted(() => {
   gap: 6px;
 }
 
-.card-reply-input {
-  width: 100%;
+.card-reply-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+
+  .card-reply-input {
+  flex: 1;
   padding: 6px 8px;
   border: 1px solid $color-border;
   border-radius: $radius-sm;
@@ -505,6 +605,26 @@ onMounted(() => {
 
   &:focus {
     border-color: $color-primary;
+  }
+}
+
+.btn-reply-submit {
+  padding: 6px 12px;
+  background: $color-primary;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: $radius-sm;
+  flex-shrink: 0;
+  transition: background 0.2s;
+
+  &:hover:not(:disabled) {
+    background: $color-primary-dark;
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 }
 
@@ -571,12 +691,124 @@ onMounted(() => {
   flex-shrink: 0;
 }
 
-.btn-confirm-all {
+.btn-preview-confirm {
   padding: 10px 40px;
   background: $color-success;
   color: #fff;
   font-size: 15px;
   font-weight: 600;
+  border-radius: $radius-md;
+  transition: background 0.2s;
+
+  &:hover:not(:disabled) {
+    background: #2d9249;
+  }
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+}
+
+// Preview modal
+.preview-modal {
+  width: 480px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-desc {
+  font-size: 13px;
+  color: $color-text-secondary;
+  margin-bottom: 16px;
+}
+
+.preview-list {
+  flex: 1;
+  overflow-y: auto;
+  margin-bottom: 16px;
+  max-height: 300px;
+}
+
+.preview-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid $color-border-light;
+
+  &:last-child {
+    border-bottom: none;
+  }
+}
+
+.preview-index {
+  font-size: 12px;
+  font-weight: 600;
+  color: $color-text-muted;
+  min-width: 28px;
+}
+
+.preview-text {
+  flex: 1;
+  font-size: 13px;
+  color: $color-text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-state {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+
+  &.state-confirmed {
+    background: rgba($color-success, 0.1);
+    color: $color-success;
+  }
+
+  &.state-modify {
+    background: rgba($color-warning, 0.1);
+    color: #b06000;
+  }
+}
+
+.modal-warning {
+  font-size: 13px;
+  color: $color-warning;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.btn-cancel {
+  padding: 8px 20px;
+  font-size: 14px;
+  color: $color-text-secondary;
+  background: $color-surface-hover;
+  border-radius: $radius-md;
+  transition: background 0.2s;
+
+  &:hover {
+    background: $color-border-light;
+  }
+}
+
+.btn-confirm {
+  padding: 8px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: $color-success;
   border-radius: $radius-md;
   transition: background 0.2s;
 

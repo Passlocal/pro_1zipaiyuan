@@ -10,13 +10,13 @@
 
       <form @submit.prevent="handleRegister">
         <div class="form-group">
-          <label class="form-label" for="reg-name">姓名</label>
+          <label class="form-label" for="reg-name">用户名</label>
           <input
             id="reg-name"
             v-model="name"
             type="text"
             class="form-input"
-            placeholder="请输入姓名"
+            placeholder="请输入用户名"
             required
           />
         </div>
@@ -39,6 +39,7 @@
               v-model="password"
               :type="showPassword ? 'text' : 'password'"
               class="form-input"
+              :class="{ 'input-error': password.length > 0 && password.length < 6 }"
               placeholder="请输入密码（至少6位）"
               required
             />
@@ -46,6 +47,7 @@
               {{ showPassword ? '🙈' : '👁' }}
             </button>
           </div>
+          <p v-if="password.length > 0 && password.length < 6" class="field-hint error">密码长度至少6位</p>
         </div>
         <div class="form-group">
           <label class="form-label" for="reg-confirm">确认密码</label>
@@ -55,6 +57,7 @@
               v-model="confirmPassword"
               :type="showConfirmPassword ? 'text' : 'password'"
               class="form-input"
+              :class="{ 'input-error': confirmPassword.length > 0 && password !== confirmPassword }"
               placeholder="请再次输入密码"
               required
             />
@@ -62,6 +65,8 @@
               {{ showConfirmPassword ? '🙈' : '👁' }}
             </button>
           </div>
+          <p v-if="confirmPassword.length > 0 && password !== confirmPassword" class="field-hint error">两次输入的密码不一致</p>
+          <p v-else-if="confirmPassword.length > 0 && password === confirmPassword" class="field-hint success">密码匹配</p>
         </div>
         <p v-if="errorMsg" class="error-msg">{{ errorMsg }}</p>
         <button type="submit" class="btn-primary" :disabled="loading">
@@ -229,6 +234,27 @@ async function handleRegister() {
   color: $color-error;
   font-size: 13px;
   margin-bottom: 12px;
+}
+
+.field-hint {
+  font-size: 12px;
+  margin-top: 4px;
+
+  &.error {
+    color: $color-error;
+  }
+
+  &.success {
+    color: $color-success;
+  }
+}
+
+.input-error {
+  border-color: $color-error !important;
+
+  &:focus {
+    box-shadow: 0 0 0 3px rgba($color-error, 0.15) !important;
+  }
 }
 
 .btn-primary {

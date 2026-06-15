@@ -1,10 +1,10 @@
 <template>
   <teleport to="body">
     <div class="modal-overlay" v-if="visible" @click.self="closeOnOverlay && $emit('close')">
-      <div class="modal-container" :class="[sizeClass]" @click.stop>
+      <div class="modal-container" :class="[sizeClass]" ref="containerRef" role="dialog" aria-modal="true" :aria-labelledby="title ? 'modal-title' : undefined" @click.stop>
         <div class="modal-header" v-if="title || $slots.header">
-          <h3 class="modal-title">{{ title }}</h3>
-          <button class="modal-close" @click="$emit('close')">×</button>
+          <h3 class="modal-title" id="modal-title">{{ title }}</h3>
+          <button class="modal-close" @click="$emit('close')" aria-label="关闭">×</button>
         </div>
         <div class="modal-body">
           <slot />
@@ -18,7 +18,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch, onUnmounted, ref } from 'vue'
 
 const props = withDefaults(defineProps<{
   visible: boolean
@@ -30,11 +30,69 @@ const props = withDefaults(defineProps<{
   closeOnOverlay: true
 })
 
-defineEmits<{
+const emit = defineEmits<{
   close: []
 }>()
 
+const containerRef = ref<HTMLElement | null>(null)
 const sizeClass = computed(() => `modal-${props.size}`)
+
+// Focus trap: cycle Tab within modal, restore focus on close
+let lastFocusedEl: HTMLElement | null = null
+
+function getFocusables(): HTMLElement[] {
+  if (!containerRef.value) return []
+  const sel = 'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+  return Array.from(containerRef.value.querySelectorAll(sel)) as HTMLElement[]
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    emit('close')
+    return
+  }
+  if (e.key === 'Tab') {
+    const els = getFocusables()
+    if (els.length === 0) return
+    const first = els[0]
+    const last = els[els.length - 1]
+    if (e.shiftKey) {
+      if (document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      }
+    } else {
+      if (document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+  }
+}
+
+watch(() => props.visible, (v) => {
+  if (v) {
+    lastFocusedEl = document.activeElement as HTMLElement | null
+    document.addEventListener('keydown', onKeydown)
+    document.body.style.overflow = 'hidden'
+    // Focus first focusable element or the close button
+    requestAnimationFrame(() => {
+      const els = getFocusables()
+      if (els.length > 0) els[0].focus()
+    })
+  } else {
+    document.removeEventListener('keydown', onKeydown)
+    document.body.style.overflow = ''
+    if (lastFocusedEl && typeof lastFocusedEl.focus === 'function') {
+      lastFocusedEl.focus()
+    }
+  }
+}, { immediate: true })
+
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKeydown)
+  document.body.style.overflow = ''
+})
 </script>
 
 <style lang="scss" scoped>

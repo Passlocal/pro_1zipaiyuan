@@ -3,7 +3,27 @@
     <!-- 顶部标题栏 -->
     <div class="dashboard-header">
       <h1 class="page-title">项目看板</h1>
-      <button class="btn-create" @click="openCreateModal">新建项目</button>
+      <button class="btn-create" @click="openCreateModal">+ 新建项目</button>
+    </div>
+
+    <!-- 统计概览 -->
+    <div class="stats-bar">
+      <div class="stat-item">
+        <span class="stat-number">{{ stats.total }}</span>
+        <span class="stat-label">全部项目</span>
+      </div>
+      <div class="stat-item stat-item--active">
+        <span class="stat-number">{{ stats.inProgress }}</span>
+        <span class="stat-label">进行中</span>
+      </div>
+      <div class="stat-item stat-item--pending">
+        <span class="stat-number">{{ stats.pending }}</span>
+        <span class="stat-label">待处理</span>
+      </div>
+      <div class="stat-item stat-item--done">
+        <span class="stat-number">{{ stats.completed }}</span>
+        <span class="stat-label">已完成</span>
+      </div>
     </div>
 
     <!-- 筛选栏 -->
@@ -35,6 +55,11 @@
     <div v-if="projectStore.loading" class="loading-state">
       <span class="loading-pulse">加载中...</span>
     </div>
+    <div v-else-if="loadError" class="error-state">
+      <span class="error-icon">⚠️</span>
+      <p>加载失败：{{ loadError }}</p>
+      <button class="btn-retry" @click="loadProjects">重新加载</button>
+    </div>
     <div v-else-if="filteredProjects.length === 0" class="empty-state">
       <span class="empty-icon">📋</span>
       <p>暂无项目</p>
@@ -48,16 +73,16 @@
         @click="goToProject(project.id)"
       >
         <div class="card-thumbnail">
-          <img v-if="project.thumbnailUrl" :src="project.thumbnailUrl" :alt="project.clientName" />
+          <img v-if="projectThumbnails[project.id]" :src="projectThumbnails[project.id]" :alt="project.clientName" />
           <div v-else class="thumbnail-placeholder">
-            <span>{{ (project as any).name?.charAt(0) || project.clientName?.charAt(0) || 'P' }}</span>
+            <span>{{ project.name?.charAt(0) || project.clientName?.charAt(0) || 'P' }}</span>
           </div>
           <span class="status-badge" :class="'status--' + project.status">
             {{ statusLabel(project.status) }}
           </span>
         </div>
         <div class="card-body">
-          <h3 class="card-title">{{ (project as any).name || project.clientName || '未命名项目' }}</h3>
+          <h3 class="card-title">{{ project.name || project.clientName || '未命名项目' }}</h3>
           <p v-if="project.clientName" class="card-client">{{ project.clientName }}</p>
           <div class="progress-bar">
             <div class="progress-fill" :class="'progress--' + project.status" :style="{ width: progressPercent(project.status) + '%' }"></div>
@@ -145,7 +170,11 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
+import { projectApi } from '@/api/projects'
+import { useToast } from '@/composables/useToast'
 import type { ProjectStatus } from '@/types/models'
+
+const toast = useToast()
 
 const router = useRouter()
 const projectStore = useProjectStore()
@@ -158,6 +187,7 @@ const filterTabs = [
   { label: '修改中', value: 'in_progress' },
   { label: '待确稿', value: 'final_review' },
   { label: '已完成', value: 'completed' },
+  { label: '已归档', value: 'archived' },
 ]
 const activeStatus = ref('')
 const searchQuery = ref('')
@@ -169,7 +199,18 @@ const statusLabelMap: Record<ProjectStatus, string> = {
   in_progress: '修改中',
   final_review: '待确稿',
   completed: '已完成',
+  archived: '已归档',
 }
+
+const stats = computed(() => {
+  const list = projectStore.projects
+  return {
+    total: list.length,
+    inProgress: list.filter(p => p.status === 'in_progress' || p.status === 'final_review').length,
+    pending: list.reduce((s, p) => s + (p.pendingCount || 0), 0),
+    completed: list.filter(p => p.status === 'completed').length,
+  }
+})
 
 function statusLabel(status: ProjectStatus): string {
   return statusLabelMap[status] || status
@@ -182,6 +223,7 @@ function progressPercent(status: ProjectStatus): number {
     in_progress: 55,
     final_review: 80,
     completed: 100,
+    archived: 100,
   }
   return map[status] || 0
 }
@@ -195,12 +237,40 @@ const filteredProjects = computed(() => {
     const q = searchQuery.value.trim().toLowerCase()
     list = list.filter(
       (p) =>
-        ((p as any).name || '').toLowerCase().includes(q) ||
+        (p.name || '').toLowerCase().includes(q) ||
         (p.clientName || '').toLowerCase().includes(q)
     )
   }
   return list
 })
+
+// Fetch first image of each project as thumbnail
+const projectThumbnails = ref<Record<string, string>>({})
+const loadError = ref('')
+
+async function loadProjects() {
+  loadError.value = ''
+  try {
+    await projectStore.fetchProjects()
+    loadProjectThumbnails()
+  } catch (e: any) {
+    loadError.value = e?.message || '未知错误'
+  }
+}
+
+async function loadProjectThumbnails() {
+  const ids = projectStore.projects.map(p => p.id)
+  if (ids.length === 0) return
+  try {
+    const res = await projectApi.batchThumbnails(ids)
+    const map = res.data.data || {}
+    Object.entries(map).forEach(([projectId, url]) => {
+      projectThumbnails.value[projectId] = url
+    })
+  } catch {
+    // ignore errors
+  }
+}
 
 function formatTime(iso: string): string {
   if (!iso) return ''
@@ -244,6 +314,9 @@ function openCreateModal() {
 }
 
 function closeCreateModal() {
+  if (createForm.value.name.trim() || uploadFiles.value.length > 0) {
+    if (!confirm('关闭后将丢失已填写的内容，确定要关闭吗？')) return
+  }
   showCreateModal.value = false
 }
 
@@ -269,16 +342,29 @@ async function handleCreate() {
     if (createForm.value.clientName.trim()) data.clientName = createForm.value.clientName.trim()
     if (createForm.value.deadline) data.deadline = createForm.value.deadline
     if (createForm.value.note.trim()) data.note = createForm.value.note.trim()
-    const project = await projectStore.createProject(data, uploadFiles.value.length > 0 ? uploadFiles.value : undefined)
+    // Create project first
+    const project = await projectStore.createProject(data)
+    // Upload files after project created
+    if (uploadFiles.value.length > 0) {
+      // Create a default unit and upload files
+      const unitRes = await projectApi.createProductUnit(project.id, '默认产品')
+      const unit = unitRes.data.data
+      if (unit && uploadFiles.value.length > 0) {
+        await projectApi.uploadImages(unit.id, uploadFiles.value)
+      }
+    }
     showCreateModal.value = false
     router.push(`/project/${project.id}`)
+  } catch (e: any) {
+    console.error('创建项目失败:', e)
+    toast.error('创建项目失败: ' + (e?.response?.data?.message || e?.message || '请稍后重试'))
   } finally {
     creating.value = false
   }
 }
 
-onMounted(() => {
-  projectStore.fetchProjects()
+onMounted(async () => {
+  await loadProjects()
 })
 </script>
 
@@ -304,6 +390,40 @@ onMounted(() => {
     font-weight: 600;
     color: $color-text;
   }
+}
+
+.stats-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.stat-item {
+  background: $color-surface;
+  border: 1px solid $color-border-light;
+  border-radius: $radius-lg;
+  padding: 16px;
+  text-align: center;
+
+  .stat-number {
+    display: block;
+    font-size: 28px;
+    font-weight: 700;
+    color: $color-text;
+    line-height: 1.2;
+  }
+
+  .stat-label {
+    display: block;
+    font-size: 13px;
+    color: $color-text-secondary;
+    margin-top: 4px;
+  }
+
+  &.stat-item--active .stat-number { color: $color-primary; }
+  &.stat-item--pending .stat-number { color: $color-warning; }
+  &.stat-item--done .stat-number { color: $color-success; }
 }
 
 .btn-create {
@@ -401,6 +521,38 @@ onMounted(() => {
   font-size: 14px;
 }
 
+.error-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: $color-text-secondary;
+
+  .error-icon {
+    font-size: 48px;
+  }
+
+  p {
+    font-size: 15px;
+    color: $color-error;
+  }
+
+  .btn-retry {
+    padding: 8px 20px;
+    background: $color-primary;
+    color: #fff;
+    font-size: 14px;
+    border-radius: $radius-md;
+    transition: background 0.2s;
+
+    &:hover {
+      background: $color-primary-dark;
+    }
+  }
+}
+
 .empty-state {
   flex: 1;
   display: flex;
@@ -483,6 +635,7 @@ onMounted(() => {
   &.status--in_progress { background: $color-primary; }
   &.status--final_review { background: #ff8c00; }
   &.status--completed { background: $color-success; }
+  &.status--archived { background: #6c757d; }
 }
 
 .card-body {
@@ -523,6 +676,7 @@ onMounted(() => {
   &.progress--in_progress { background: $color-primary; }
   &.progress--final_review { background: #ff8c00; }
   &.progress--completed { background: $color-success; }
+  &.progress--archived { background: #6c757d; }
 }
 
 .card-meta {

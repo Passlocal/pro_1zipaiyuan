@@ -30,10 +30,11 @@ export interface ClientIdentity {
 }
 
 // ============ 项目管理 ============
-export type ProjectStatus = 'draft' | 'review' | 'in_progress' | 'final_review' | 'completed'
+export type ProjectStatus = 'draft' | 'review' | 'in_progress' | 'final_review' | 'completed' | 'archived'
 
 export interface Project {
   id: string
+  name: string
   workspaceId: string
   clientName: string
   deadline?: string
@@ -121,7 +122,7 @@ export interface AnnotationCreateParams {
 
 // ============ 意见卡片 ============
 export type CardStatus = 'unresolved' | 'resolved'
-export type CardStatusAction = 'resolve' | 'reject'
+export type CardStatusAction = 'resolve' | 'unresolve'
 
 export interface CommentCard {
   id: string
@@ -223,6 +224,8 @@ export interface ColorCheckReport {
 export interface Portfolio {
   id: string
   projectId: string
+  name: string
+  description: string
   coverUrl: string
   images: PortfolioImage[]
   clientName: string
@@ -231,6 +234,7 @@ export interface Portfolio {
   qrCode: string
   views: number
   avgDuration: number
+  isPublished: boolean
   createdAt: string
 }
 

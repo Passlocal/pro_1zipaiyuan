@@ -23,7 +23,7 @@ export const annotationApi = {
   updateCardText: (id: string, text: string) =>
     client.put<ApiResponse<CommentCard>>(`/comment-cards/${id}`, { text }),
 
-  updateCardStatus: (id: string, action: 'resolve' | 'reject') =>
+  updateCardStatus: (id: string, action: 'resolve' | 'unresolve') =>
     client.put<ApiResponse<CommentCard>>(`/comment-cards/${id}/status`, { action }),
 
   getCardsByImage: (imageId: string) =>
@@ -35,7 +35,7 @@ export const annotationApi = {
   // 成片上传
   uploadRevision: (imageId: string, file: File, commentCardId?: string) => {
     const formData = new FormData()
-    formData.append('image', file)
+    formData.append('file', file)
     if (commentCardId) formData.append('commentCardId', commentCardId)
     return client.post<ApiResponse<Revision>>(`/images/${imageId}/revision`, formData, {
       headers: { 'Content-Type': 'multipart/form-data' }

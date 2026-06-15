@@ -1,14 +1,30 @@
 <template>
-  <div class="upload-zone" :class="{ 'is-dragover': isDragover, 'is-disabled': disabled }"
+  <div
+    class="upload-zone"
+    :class="{ 'is-dragover': isDragover, 'is-disabled': disabled }"
+    role="button"
+    :aria-label="hint"
+    :aria-describedby="uploadDescId"
+    tabindex="0"
+    @keydown.enter.prevent="triggerInput"
+    @keydown.space.prevent="triggerInput"
     @dragover.prevent="onDragOver"
     @dragleave.prevent="onDragLeave"
     @drop.prevent="onDrop"
-    @click="triggerInput">
-    <input ref="inputRef" type="file" :accept="accept" :multiple="multiple" class="upload-input"
-      @change="onFileChange" />
+    @click="triggerInput"
+  >
+    <input
+      ref="inputRef"
+      type="file"
+      :accept="accept"
+      :multiple="multiple"
+      class="upload-input"
+      :aria-hidden="'true'"
+      @change="onFileChange"
+    />
     <div class="upload-content">
-      <span class="upload-icon">📁</span>
-      <p class="upload-hint"><slot>{{ hint }}</slot></p>
+      <span class="upload-icon" aria-hidden="true">📁</span>
+      <p class="upload-hint" :id="uploadDescId"><slot>{{ hint }}</slot></p>
       <p class="upload-subhint" v-if="subHint">{{ subHint }}</p>
     </div>
   </div>
@@ -34,6 +50,8 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   files: [files: File[]]
 }>()
+
+const uploadDescId = 'upload-desc-' + Math.random().toString(36).slice(2, 8)
 
 const isDragover = ref(false)
 const inputRef = ref<HTMLInputElement>()
