@@ -18,7 +18,7 @@
         @click="goToProject(task.projectId)"
       >
         <div class="task-priority-bar"></div>
-        <div class="task-thumb" v-if="task.thumbnailUrl">
+        <div class="task-thumb" v-if="task.thumbnailUrl" @mouseenter="showPreview($event, task)" @mouseleave="hidePreview">
           <img :src="task.thumbnailUrl" alt="" />
         </div>
         <div class="task-body">
@@ -30,6 +30,7 @@
           <p class="task-text">{{ task.text || '无描述' }}</p>
           <div class="task-meta">
             <span class="task-time">{{ formatTime(task.createdAt) }}</span>
+            <span v-if="task.estimatedTime" class="task-estimated-time">⏱ {{ task.estimatedTime }}分钟</span>
           </div>
         </div>
         <div class="task-actions">
@@ -37,11 +38,20 @@
         </div>
       </div>
     </div>
+
+    <!-- 任务预览浮窗 -->
+    <div
+      v-if="previewTask"
+      class="preview-overlay"
+      :style="{ left: previewPos.x + 'px', top: previewPos.y + 'px' }"
+    >
+      <img :src="previewTask.thumbnailUrl" alt="" />
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { dashboardApi } from '@/api/dashboard'
 import type { MyTask } from '@/types/models'
@@ -49,6 +59,20 @@ import type { MyTask } from '@/types/models'
 const router = useRouter()
 const loading = ref(true)
 const tasks = ref<MyTask[]>([])
+
+// 预览浮窗
+const previewTask = ref<MyTask | null>(null)
+const previewPos = reactive({ x: 0, y: 0 })
+
+function showPreview(e: MouseEvent, task: MyTask) {
+  previewTask.value = task
+  previewPos.x = e.clientX + 16
+  previewPos.y = e.clientY + 16
+}
+
+function hidePreview() {
+  previewTask.value = null
+}
 
 function formatTime(iso: string): string {
   const d = new Date(iso + 'Z')
@@ -68,6 +92,11 @@ async function resolveTask(task: MyTask) {
     const { annotationApi } = await import('@/api/annotations')
     await annotationApi.updateCardStatus(task.id, 'resolve')
     tasks.value = tasks.value.filter(t => t.id !== task.id)
+    // 快速流转：自动滚动到下一个任务
+    const nextCard = document.querySelector('.task-card')
+    if (nextCard) {
+      nextCard.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
   } catch (e) {
     console.error('[MyTasks] resolve failed', e)
   }
@@ -208,6 +237,14 @@ onMounted(async () => {
   margin-top: 4px;
   font-size: 12px;
   color: $color-text-muted;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.task-estimated-time {
+  color: $color-primary;
+  font-weight: 500;
 }
 
 .task-actions {
@@ -222,5 +259,24 @@ onMounted(async () => {
   border-radius: $radius-md;
   transition: background 0.15s;
   &:hover { background: $color-primary-dark; }
+}
+
+// 预览浮窗
+.preview-overlay {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  border-radius: $radius-lg;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  border: 2px solid $color-border-light;
+  background: #fff;
+
+  img {
+    display: block;
+    width: 280px;
+    height: 210px;
+    object-fit: cover;
+  }
 }
 </style>

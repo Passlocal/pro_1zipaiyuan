@@ -1,6 +1,6 @@
 import client from './client'
 import type { ApiResponse } from '@/types/api'
-import type { Annotation, AnnotationCreateParams, CommentCard, Revision } from '@/types/models'
+import type { Annotation, AnnotationCreateParams, CommentCard, Revision, ImageDiscussion, ReviewCard } from '@/types/models'
 
 export const annotationApi = {
   // 标注 CRUD
@@ -47,5 +47,34 @@ export const annotationApi = {
     client.get(`/projects/${projectId}/comments/export`, {
       params: { format },
       responseType: 'blob'
-    })
+    }),
+
+  // 预设短语
+  getPresetPhrases: () =>
+    client.get<ApiResponse<string[]>>('/v1/workspace/preset-phrases'),
+
+  // 跨图同步
+  syncCardToImages: (cardId: string, imageIds: string[]) =>
+    client.post<ApiResponse<void>>(`/v1/comment-cards/${cardId}/sync-to-images`, { imageIds }),
+
+  // 图片讨论
+  getDiscussions: (imageId: string) =>
+    client.get<ApiResponse<ImageDiscussion[]>>(`/v1/images/${imageId}/discussions`),
+
+  createDiscussion: (imageId: string, data: { text: string; mentions: string[] }) =>
+    client.post<ApiResponse<ImageDiscussion>>(`/v1/images/${imageId}/discussions`, data),
+
+  // 抽查
+  getReviewRecentResolved: (projectId: string) =>
+    client.get<ApiResponse<ReviewCard[]>>(`/v1/projects/${projectId}/review-recent-resolved`),
+
+  reviewCard: (cardId: string, action: 'approve' | 'reject') =>
+    client.post<ApiResponse<void>>(`/v1/review-cards/${cardId}/review`, { action }),
+
+  // 最近操作
+  getRecentActions: (projectId: string) =>
+    client.get<ApiResponse<any[]>>(`/v1/projects/${projectId}/recent-actions`),
+
+  undoRecentAction: (actionId: string) =>
+    client.post<ApiResponse<void>>(`/v1/recent-actions/${actionId}/undo`),
 }

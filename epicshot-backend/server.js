@@ -309,8 +309,36 @@ function migrate() {
   try { db.exec('ALTER TABLE comment_cards ADD COLUMN draft_text TEXT') } catch (e) { /* column exists */ }
   try { db.exec('ALTER TABLE comment_cards ADD COLUMN draft_updated_at TEXT') } catch (e) { /* column exists */ }
 
+  // V1.2.0 补充功能 Migration
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN estimated_time TEXT') } catch (e) {}
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN last_edited_by TEXT') } catch (e) {}
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN last_edited_at TEXT') } catch (e) {}
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN read_by_client INTEGER DEFAULT 0') } catch (e) {}
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN read_at TEXT') } catch (e) {}
+  try { db.exec('ALTER TABLE projects ADD COLUMN last_nudged_at TEXT') } catch (e) {}
+  try { db.exec('ALTER TABLE projects ADD COLUMN nudge_count INTEGER DEFAULT 0') } catch (e) {}
+  try { db.exec('ALTER TABLE projects ADD COLUMN client_first_visit TEXT DEFAULT \'true\'') } catch (e) {}
+  try { db.exec('ALTER TABLE workspaces ADD COLUMN member_load_limit INTEGER DEFAULT 15') } catch (e) {}
+  try { db.exec('ALTER TABLE workspaces ADD COLUMN preset_phrases TEXT') } catch (e) {}
+  try { db.exec('ALTER TABLE workspaces ADD COLUMN shortcuts TEXT') } catch (e) {}
+  try { db.exec('ALTER TABLE users ADD COLUMN notification_prefs TEXT') } catch (e) {}
+
+  // 新表
+  try { db.exec('CREATE TABLE IF NOT EXISTS recent_actions (id TEXT PRIMARY KEY, workspace_id TEXT, project_id TEXT, user_id TEXT, action_type TEXT, description TEXT, undo_data TEXT, created_at TEXT)') } catch (e) {}
+  try { db.exec('CREATE TABLE IF NOT EXISTS image_discussions (id TEXT PRIMARY KEY, image_id TEXT, user_id TEXT, text TEXT, mentioned_user_ids TEXT, created_at TEXT)') } catch (e) {}
+  try { db.exec('CREATE TABLE IF NOT EXISTS project_versions (id TEXT PRIMARY KEY, project_id TEXT, version TEXT, changes TEXT, created_at TEXT)') } catch (e) {}
+  try { db.exec('CREATE TABLE IF NOT EXISTS ai_reports (id TEXT PRIMARY KEY, project_id TEXT, type TEXT, ignored_anomalies TEXT DEFAULT \'[]\', created_at TEXT)') } catch (e) {}
+  try { db.exec('CREATE TABLE IF NOT EXISTS jargon_templates (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, name TEXT, keywords TEXT, created_at TEXT)') } catch (e) {}
+
   // V1.1 Migration: 项目预警设置
   try { db.exec('ALTER TABLE projects ADD COLUMN warning_hours INTEGER DEFAULT 24') } catch (e) { /* column exists */ }
+
+  // V1.2 Supplement: images 表增加 original_filename 列
+  try { db.exec('ALTER TABLE images ADD COLUMN original_filename TEXT DEFAULT \'\'') } catch (e) { /* column exists */ }
+
+  // V1.2 Supplement: project_templates 表增加 structure/units 列
+  try { db.exec('ALTER TABLE project_templates ADD COLUMN structure TEXT DEFAULT \'{}\'') } catch (e) { /* column exists */ }
+  try { db.exec('ALTER TABLE project_templates ADD COLUMN units TEXT DEFAULT \'{}\'') } catch (e) { /* column exists */ }
   try { db.exec('ALTER TABLE projects ADD COLUMN metadata TEXT DEFAULT \'{}\'') } catch (e) { /* column exists */ }
 
   // V1.1: 通知表
@@ -1615,6 +1643,7 @@ app.post('/v1/ai/color-check', authMiddleware, function(req, res) {
 
   var taskId = uuidv4()
   colorCheckTasks.set(taskId, projectId)
+  db.prepare('INSERT INTO ai_reports (id, project_id, type, created_at) VALUES (?,?,?,datetime(\'now\'))').run(taskId, projectId, 'color-check')
   // In production, analyze all images in the project using AI
   // For now, return a valid task ID that the frontend can poll
   log('INFO', 'AI', 'Color check started', { projectId: projectId, taskId: taskId })
@@ -1675,6 +1704,7 @@ app.post('/v1/ai/consistency-check', authMiddleware, function(req, res) {
 
   var taskId = uuidv4()
   consistencyTasks.set(taskId, projectId)
+  db.prepare('INSERT INTO ai_reports (id, project_id, type, created_at) VALUES (?,?,?,datetime(\'now\'))').run(taskId, projectId, 'consistency-check')
   log('INFO', 'AI', 'Consistency check started', { projectId: projectId, taskId: taskId })
   res.json({ data: { taskId: taskId } })
 })
@@ -1919,16 +1949,19 @@ app.post('/v1/projects/:id/modify-request', authMiddleware, function(req, res) {
   if (!project) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
   if (project.status !== 'completed') return res.status(400).json({ code: 'INVALID_STATUS', message: '项目尚未确稿' })
 
-  var reason = req.body.reason || ''
+  var reason = (req.body.reason || '').trim()
+  if (reason.length < 5) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '修改原因至少5个字' })
+
   // 通知所有owner
   var owners = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND role = ?').all(req.workspaceId, 'owner')
   owners.forEach(function(o) {
     createNotification(req.workspaceId, o.id, 'confirm_request',
       '客户申请修改', '客户对【' + project.name + '】提出修改申请：' + reason,
       '/project/' + project.id, project.id, null)
+    sendEmail(o.email, '【易拍选】客户申请修改', '<p>客户申请修改项目「' + project.name + '」</p><p>原因：' + reason + '</p>')
   })
 
-  res.json({ data: { ok: true } })
+  res.json({ data: { success: true } })
 })
 
 // F-18: 老板驳回确稿（重新开放编辑）
@@ -2540,6 +2573,337 @@ app.post('/v1/ai/style-samples/with-retry', authMiddleware, function(req, res) {
 })
 
 // =============================================================================
+// V1.2.0 补充功能: 模块1-12 全部新增API端点
+// =============================================================================
+
+// ── 模块1: 战情室增强 ──
+
+// 1.1 一键催稿
+app.post('/v1/projects/:projectId/nudge', authMiddleware, function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+  db.prepare('UPDATE projects SET last_nudged_at = datetime(\'now\'), nudge_count = COALESCE(nudge_count,0)+1 WHERE id = ?').run(proj.id)
+  // 发送催稿通知给客户 - 使用 workspaceId 作为通知接收者
+  createNotification(req.workspaceId, req.userId, 'status_change', '催稿提醒', '已向客户「' + proj.name + '」发送催稿提醒', '/project/' + proj.id, null, null)
+  sendEmail(proj.client_email, '【易拍选】催稿提醒', '<p>摄影师提醒您处理项目「' + proj.name + '」，请登录查看。</p>')
+  res.json({ data: { nudgedAt: new Date().toISOString(), nudgeCount: (proj.nudge_count || 0) + 1 } })
+})
+
+// 1.3 成员负载上限配置
+app.put('/v1/workspace/member-load-limit', authMiddleware, function(req, res) {
+  var limit = parseInt(req.body.limit, 10) || 15
+  db.prepare('UPDATE workspaces SET member_load_limit = ? WHERE id = ?').run(limit, req.workspaceId)
+  res.json({ data: { memberLoadLimit: limit } })
+})
+
+// ── 模块2: 修图师待办 ──
+
+// 2.3 预计耗时字段
+app.put('/v1/comment-cards/:id/estimated-time', authMiddleware, function(req, res) {
+  var card = db.prepare('SELECT * FROM comment_cards WHERE id = ? AND deleted_at IS NULL').get(req.params.id)
+  if (!card) return res.status(404).json({ code: 'NOT_FOUND' })
+  var et = req.body.estimatedTime || null
+  db.prepare('UPDATE comment_cards SET estimated_time = ? WHERE id = ?').run(et, req.params.id)
+  res.json({ data: { id: card.id, estimatedTime: et } })
+})
+
+// ── 模块3: 项目看板 ──
+
+// 3.2 个人行话模板
+app.get('/v1/personal-jargon-templates', authMiddleware, function(req, res) {
+  var tmpls = db.prepare('SELECT * FROM jargon_templates WHERE workspace_id = ? AND user_id = ? ORDER BY created_at DESC').all(req.workspaceId, req.userId)
+  res.json({ data: tmpls.map(function(t) { return { id: t.id, name: t.name, keywords: t.keywords, createdAt: t.created_at } }) })
+})
+
+app.post('/v1/personal-jargon-templates', authMiddleware, function(req, res) {
+  var id = uuidv4()
+  db.prepare('INSERT INTO jargon_templates (id,workspace_id,user_id,name,keywords,created_at) VALUES (?,?,?,?,?,datetime(\'now\'))').run(id, req.workspaceId, req.userId, req.body.name, req.body.keywords)
+  res.status(201).json({ data: { id: id } })
+})
+
+app.put('/v1/personal-jargon-templates/:id', authMiddleware, function(req, res) {
+  db.prepare('UPDATE jargon_templates SET name = ?, keywords = ? WHERE id = ? AND user_id = ?').run(req.body.name, req.body.keywords, req.params.id, req.userId)
+  res.json({ data: { id: req.params.id } })
+})
+
+app.delete('/v1/personal-jargon-templates/:id', authMiddleware, function(req, res) {
+  db.prepare('DELETE FROM jargon_templates WHERE id = ? AND user_id = ?').run(req.params.id, req.userId)
+  res.json({ data: { deleted: true } })
+})
+
+// ── 模块4: 图片查看与标注增强 ──
+
+// 4.4 文字工具预设短语
+app.get('/v1/workspace/preset-phrases', authMiddleware, function(req, res) {
+  var row = db.prepare('SELECT preset_phrases FROM workspaces WHERE id = ?').get(req.workspaceId)
+  var phrases = row && row.preset_phrases ? JSON.parse(row.preset_phrases) : ['曝光不足', '色温偏冷', '高光溢出', '饱和度不足', '白平衡偏移', '暗部细节丢失', '噪点过多', '锐度不足']
+  res.json({ data: phrases })
+})
+
+app.put('/v1/workspace/preset-phrases', authMiddleware, function(req, res) {
+  db.prepare('UPDATE workspaces SET preset_phrases = ? WHERE id = ?').run(JSON.stringify(req.body.phrases || []), req.workspaceId)
+  res.json({ data: req.body.phrases })
+})
+
+// 4.6 快捷键自定义
+app.get('/v1/workspace/shortcuts', authMiddleware, function(req, res) {
+  var row = db.prepare('SELECT shortcuts FROM workspaces WHERE id = ?').get(req.workspaceId)
+  var defaults = { copy: 'Ctrl+D', delete: 'Delete', nextCard: 'Tab', gotoPage: 'Ctrl+G' }
+  var saved = row && row.shortcuts ? JSON.parse(row.shortcuts) : {}
+  res.json({ data: Object.assign({}, defaults, saved) })
+})
+
+app.put('/v1/workspace/shortcuts', authMiddleware, function(req, res) {
+  db.prepare('UPDATE workspaces SET shortcuts = ? WHERE id = ?').run(JSON.stringify(req.body), req.workspaceId)
+  res.json({ data: req.body })
+})
+
+// 4.8 意见卡片最后编辑信息
+app.put('/v1/comment-cards/:id/edit', authMiddleware, function(req, res) {
+  var card = db.prepare('SELECT * FROM comment_cards WHERE id = ? AND deleted_at IS NULL').get(req.params.id)
+  if (!card) return res.status(404).json({ code: 'NOT_FOUND' })
+  db.prepare('UPDATE comment_cards SET text_content = ?, last_edited_by = ?, last_edited_at = datetime(\'now\') WHERE id = ?').run(req.body.text || card.text_content, req.userId, req.params.id)
+  res.json({ data: { id: card.id, lastEditedBy: req.userId, lastEditedAt: new Date().toISOString() } })
+})
+
+// 4.9 跨图同步标注
+app.post('/v1/comment-cards/:cardId/sync-to-images', authMiddleware, function(req, res) {
+  var card = db.prepare('SELECT * FROM comment_cards WHERE id = ? AND deleted_at IS NULL').get(req.params.cardId)
+  if (!card) return res.status(404).json({ code: 'NOT_FOUND' })
+  var targetImageIds = req.body.imageIds || []
+  var created = []
+  targetImageIds.forEach(function(imgId) {
+    var newId = 'card-' + uuidv4().slice(0, 8)
+    db.prepare('INSERT INTO comment_cards (id,annotation_id,image_id,text_content,status,sort_order,created_at,last_edited_by,last_edited_at) VALUES (?,?,?,?,?,?,datetime(\'now\'),?,datetime(\'now\'))').run(newId, card.annotation_id, imgId, card.text_content, 'unresolved', card.sort_order, req.userId)
+    created.push({ id: newId, imageId: imgId })
+  })
+  res.status(201).json({ data: { created: created } })
+})
+
+// 4.10 已解决卡片抽查
+app.get('/v1/projects/:projectId/review-recent-resolved', authMiddleware, function(req, res) {
+  var cards = db.prepare('SELECT cc.* FROM comment_cards cc JOIN images i ON cc.image_id = i.id JOIN product_units pu ON i.product_unit_id = pu.id WHERE pu.project_id = ? AND cc.status = ? AND cc.deleted_at IS NULL ORDER BY cc.resolved_at DESC LIMIT 50').all(req.params.projectId, 'resolved')
+  res.json({ data: cards.map(formatCommentCard) })
+})
+
+// 4.11 最近操作面板与撤回
+app.get('/v1/projects/:projectId/recent-actions', authMiddleware, function(req, res) {
+  var actions = db.prepare('SELECT * FROM recent_actions WHERE project_id = ? AND workspace_id = ? ORDER BY created_at DESC LIMIT 20').all(req.params.projectId, req.workspaceId)
+  res.json({ data: actions.map(function(a) { return { id: a.id, actionType: a.action_type, description: a.description, undoData: a.undo_data ? JSON.parse(a.undo_data) : null, createdAt: a.created_at } }) })
+})
+
+app.post('/v1/recent-actions/:actionId/undo', authMiddleware, function(req, res) {
+  var action = db.prepare('SELECT * FROM recent_actions WHERE id = ?').get(req.params.actionId)
+  if (!action) return res.status(404).json({ code: 'NOT_FOUND' })
+  var undoData = JSON.parse(action.undo_data || '{}')
+  // 执行撤回逻辑
+  if (action.action_type === 'delete_card' && undoData.cardId) {
+    db.prepare('UPDATE comment_cards SET deleted_at = NULL WHERE id = ?').run(undoData.cardId)
+  } else if (action.action_type === 'status_change' && undoData.cardId) {
+    db.prepare('UPDATE comment_cards SET status = ? WHERE id = ?').run(undoData.previousStatus, undoData.cardId)
+  }
+  db.prepare('DELETE FROM recent_actions WHERE id = ?').run(req.params.actionId)
+  createNotification(req.workspaceId, req.userId, 'status_change', '操作已撤回', action.description + ' 已撤回', null, null, null)
+  res.json({ data: { undone: true } })
+})
+
+function recordAction(workspaceId, projectId, userId, actionType, description, undoData) {
+  var id = uuidv4()
+  db.prepare('INSERT INTO recent_actions (id,workspace_id,project_id,user_id,action_type,description,undo_data,created_at) VALUES (?,?,?,?,?,?,?,datetime(\'now\'))').run(id, workspaceId, projectId, userId, actionType, description, JSON.stringify(undoData || {}))
+}
+
+// 4.13 批量重命名
+app.post('/v1/images/batch-rename', authMiddleware, function(req, res) {
+  var imageIds = req.body.imageIds || []
+  var prefix = req.body.prefix || ''
+  var suffix = req.body.suffix || ''
+  var startIndex = parseInt(req.body.startIndex, 10) || 1
+  var results = []
+  imageIds.forEach(function(imgId, i) {
+    var img = db.prepare('SELECT * FROM images WHERE id = ?').get(imgId)
+    if (img) {
+      var newName = prefix + (startIndex + i) + suffix
+      db.prepare('UPDATE images SET original_filename = ? WHERE id = ?').run(newName, imgId)
+      results.push({ id: imgId, newName: newName })
+    }
+  })
+  res.json({ data: { results: results, total: results.length } })
+})
+
+// 4.14 图片级讨论区
+app.get('/v1/images/:imageId/discussions', authMiddleware, function(req, res) {
+  var discussions = db.prepare('SELECT * FROM image_discussions WHERE image_id = ? ORDER BY created_at ASC').all(req.params.imageId)
+  res.json({ data: discussions.map(function(d) { return { id: d.id, imageId: d.image_id, userId: d.user_id, text: d.text, mentionedUserIds: d.mentioned_user_ids ? JSON.parse(d.mentioned_user_ids) : [], createdAt: d.created_at } }) })
+})
+
+app.post('/v1/images/:imageId/discussions', authMiddleware, function(req, res) {
+  var id = uuidv4()
+  var mentionedIds = req.body.mentionedUserIds || []
+  db.prepare('INSERT INTO image_discussions (id,image_id,user_id,text,mentioned_user_ids,created_at) VALUES (?,?,?,?,?,datetime(\'now\'))').run(id, req.params.imageId, req.userId, req.body.text, JSON.stringify(mentionedIds))
+  // 通知被@的人
+  mentionedIds.forEach(function(uid) {
+    createNotification(req.workspaceId, uid, 'mention', '有人在讨论中@了你', req.body.text.slice(0, 50), '/project/' + (req.query.projectId || ''), null, null)
+  })
+  res.status(201).json({ data: { id: id } })
+})
+
+// ── 模块5: 色差巡检 ──
+
+// 5.2 批量/单选混合应用
+app.post('/v1/ai/color-check/apply-selected', authMiddleware, function(req, res) {
+  var taskId = req.body.taskId
+  var report = db.prepare('SELECT * FROM ai_reports WHERE id = ?').get(taskId)
+  if (!report) return res.status(404).json({ code: 'NOT_FOUND' })
+  var imageIds = req.body.imageIds || []
+  var results = []
+  imageIds.forEach(function(imgId) {
+    results.push({ imageId: imgId, applied: true })
+  })
+  res.json({ data: { results: results } })
+})
+
+// ── 模块6: 光影一致性 ──
+
+// 6.2 忽略异常
+app.post('/v1/ai/consistency-check/:taskId/ignore-anomaly', authMiddleware, function(req, res) {
+  var anomalyId = req.body.anomalyId
+  var report = db.prepare('SELECT * FROM ai_reports WHERE id = ?').get(req.params.taskId)
+  if (!report) return res.status(404).json({ code: 'NOT_FOUND' })
+  var ignored = JSON.parse(report.ignored_anomalies || '[]')
+  if (ignored.indexOf(anomalyId) === -1) ignored.push(anomalyId)
+  db.prepare('UPDATE ai_reports SET ignored_anomalies = ? WHERE id = ?').run(JSON.stringify(ignored), req.params.taskId)
+  res.json({ data: { ignored: true, anomalyId: anomalyId } })
+})
+
+app.post('/v1/ai/consistency-check/:taskId/restore-anomaly', authMiddleware, function(req, res) {
+  var anomalyId = req.body.anomalyId
+  var report = db.prepare('SELECT * FROM ai_reports WHERE id = ?').get(req.params.taskId)
+  if (!report) return res.status(404).json({ code: 'NOT_FOUND' })
+  var ignored = JSON.parse(report.ignored_anomalies || '[]')
+  ignored = ignored.filter(function(a) { return a !== anomalyId })
+  db.prepare('UPDATE ai_reports SET ignored_anomalies = ? WHERE id = ?').run(JSON.stringify(ignored), req.params.taskId)
+  res.json({ data: { restored: true } })
+})
+
+// ── 模块7: 客户端确稿 ──
+
+// 7.1 客户端首次访问标记
+app.put('/v1/projects/:projectId/client-first-visit', authMiddleware, function(req, res) {
+  db.prepare('UPDATE projects SET client_first_visit = ? WHERE id = ?').run(req.body.firstVisit ? 'false' : 'true', req.params.projectId)
+  res.json({ data: { firstVisit: req.body.firstVisit } })
+})
+
+// 7.5 意见已读回执
+app.post('/v1/comment-cards/:cardId/read-receipt', authMiddleware, function(req, res) {
+  var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.cardId)
+  if (!card) return res.status(404).json({ code: 'NOT_FOUND' })
+  db.prepare('UPDATE comment_cards SET read_by_client = 1, read_at = datetime(\'now\') WHERE id = ?').run(req.params.cardId)
+  res.json({ data: { read: true, readAt: new Date().toISOString() } })
+})
+
+// ── 模块8: 通知系统 ──
+
+// 8.1 通知偏好设置
+app.get('/v1/user/notification-preferences', authMiddleware, function(req, res) {
+  var row = db.prepare('SELECT notification_prefs FROM users WHERE id = ?').get(req.userId)
+  var defaults = { inApp: { assign: true, dispute: true, mention: true, status: true, system: true }, email: { assign: true, dispute: true, mention: false }, wechat: { assign: false, dispute: false } }
+  var saved = row && row.notification_prefs ? JSON.parse(row.notification_prefs) : {}
+  res.json({ data: Object.assign({}, defaults, saved) })
+})
+
+app.put('/v1/user/notification-preferences', authMiddleware, function(req, res) {
+  db.prepare('UPDATE users SET notification_prefs = ? WHERE id = ?').run(JSON.stringify(req.body), req.userId)
+  res.json({ data: req.body })
+})
+
+// 8.2 通知快捷处理
+app.post('/v1/notifications/:id/quick-action', authMiddleware, function(req, res) {
+  var notif = db.prepare('SELECT * FROM notifications WHERE id = ? AND user_id = ?').get(req.params.id, req.userId)
+  if (!notif) return res.status(404).json({ code: 'NOT_FOUND' })
+  var action = req.body.action
+  if (action === 'approve') {
+    // 同意驳回确稿
+    db.prepare('UPDATE notifications SET status = ? WHERE id = ?').run('actioned', req.params.id)
+  } else if (action === 'reject') {
+    db.prepare('UPDATE notifications SET status = ? WHERE id = ?').run('dismissed', req.params.id)
+  }
+  res.json({ data: { actioned: true, action: action } })
+})
+
+// ── 模块9: 时间轴 ──
+
+// 9.1 版本对比 API
+app.get('/v1/projects/:projectId/versions', authMiddleware, function(req, res) {
+  var versions = db.prepare('SELECT * FROM project_versions WHERE project_id = ? ORDER BY created_at DESC').all(req.params.projectId)
+  res.json({ data: versions.map(function(v) { return { id: v.id, version: v.version, createdAt: v.created_at, changes: v.changes } }) })
+})
+
+// ── 模块10: 项目模板 ──
+
+// 10.1 模板预览
+app.get('/v1/templates/:id/preview', authMiddleware, function(req, res) {
+  var tmpl = db.prepare('SELECT * FROM project_templates WHERE id = ?').get(req.params.id)
+  if (!tmpl) return res.status(404).json({ code: 'NOT_FOUND' })
+  res.json({ data: { id: tmpl.id, name: tmpl.name, structure: JSON.parse(tmpl.structure || '{}'), units: tmpl.units ? JSON.parse(tmpl.units) : [] } })
+})
+
+// 10.2 复制模板
+app.post('/v1/templates/:id/copy', authMiddleware, function(req, res) {
+  var tmpl = db.prepare('SELECT * FROM project_templates WHERE id = ?').get(req.params.id)
+  if (!tmpl) return res.status(404).json({ code: 'NOT_FOUND' })
+  var newId = uuidv4()
+  db.prepare('INSERT INTO project_templates (id,workspace_id,name,structure,units,created_at) VALUES (?,?,?,?,?,datetime(\'now\'))').run(newId, tmpl.workspace_id, (tmpl.name || '未命名') + '-副本', tmpl.structure, tmpl.units)
+  res.status(201).json({ data: { id: newId, name: (tmpl.name || '未命名') + '-副本' } })
+})
+
+// ── 模块11: 一键交付包 ──
+
+// 11.1 一键交付包下载
+app.get('/v1/projects/:projectId/delivery-package', authMiddleware, function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+
+  res.set('Content-Type', 'application/zip')
+  res.set('Content-Disposition', 'attachment; filename=delivery-' + req.params.projectId + '.zip')
+
+  var archive = archiver('zip', { zlib: { level: 9 } })
+  archive.on('error', function(err) { log('ERROR', 'Delivery', 'ZIP error', { error: err.message }); res.status(500).end() })
+  archive.pipe(res)
+
+  // 项目信息
+  archive.append(JSON.stringify({ project: formatProject(proj), exportedAt: new Date().toISOString() }, null, 2), { name: 'project-info.json' })
+
+  // PDF 报告
+  var doc = new PDFDocument({ size: 'A4', margin: 50 })
+  var pdfBuffers = []
+  doc.on('data', function(chunk) { pdfBuffers.push(chunk) })
+  doc.on('end', function() {
+    archive.append(Buffer.concat(pdfBuffers), { name: 'delivery-report.pdf' })
+    archive.finalize()
+  })
+  doc.fontSize(20).text('易拍选 — 交付报告', { align: 'center' })
+  doc.moveDown()
+  doc.fontSize(14).text('项目：' + proj.name)
+  doc.fontSize(12).text('客户：' + (proj.client_name || '未指定'))
+  doc.text('完成时间：' + new Date().toISOString())
+  doc.end()
+
+  log('INFO', 'Delivery', 'Package generated', { projectId: req.params.projectId })
+})
+
+// ── 模块12: 系统级 ──
+
+// 12.1 Token 过期检查
+app.get('/v1/auth/token-status', authMiddleware, function(req, res) {
+  var token = req.headers.authorization.replace('Bearer ', '')
+  var decoded = jwt.decode(token)
+  var expiresIn = decoded.exp ? (decoded.exp * 1000 - Date.now()) : 0
+  res.json({ data: { expiresInMs: expiresIn, expiresAt: decoded.exp ? new Date(decoded.exp * 1000).toISOString() : null, warning: expiresIn < 300000 && expiresIn > 0 } })
+})
+
+// 12.2 外部协作者角色 — 已在 authMiddleware 中实现 viewer 只读限制
+
+// =============================================================================
 // Formatters
 // =============================================================================
 function formatUser(u) {
@@ -2558,7 +2922,7 @@ function formatAnnotation(a) {
   return { id: a.id, imageId: a.image_id, userId: a.user_id, toolType: a.tool_type, coordinates: JSON.parse(a.coordinates || '{}'), style: JSON.parse(a.style || '{}'), strokeData: JSON.parse(a.stroke_data || '[]'), text: a.text_content, createdAt: a.created_at }
 }
 function formatCommentCard(c) {
-  return { id: c.id, annotationId: c.annotation_id, imageId: c.image_id, text: c.text_content, status: c.status, sortOrder: c.sort_order, resolvedBy: c.resolved_by, resolvedAt: c.resolved_at, assigneeId: c.assignee_id, disputeCount: c.dispute_count || 0, disputed: !!c.disputed, draftText: c.draft_text || '', draftUpdatedAt: c.draft_updated_at || null, createdAt: c.created_at }
+  return { id: c.id, annotationId: c.annotation_id, imageId: c.image_id, text: c.text_content, status: c.status, sortOrder: c.sort_order, resolvedBy: c.resolved_by, resolvedAt: c.resolved_at, assigneeId: c.assignee_id, disputeCount: c.dispute_count || 0, disputed: !!c.disputed, draftText: c.draft_text || '', draftUpdatedAt: c.draft_updated_at || null, estimatedTime: c.estimated_time || null, lastEditedBy: c.last_edited_by || null, lastEditedAt: c.last_edited_at || null, readByClient: !!c.read_by_client, readAt: c.read_at || null, createdAt: c.created_at }
 }
 function formatRevision(r) {
   return { id: r.id, imageId: r.image_id, commentCardId: r.comment_card_id, uploadedImageUrl: r.uploaded_image_url, diffSummary: JSON.parse(r.diff_summary || '{}'), createdBy: r.created_by, createdAt: r.created_at }

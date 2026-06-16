@@ -1,5 +1,11 @@
 <template>
   <div class="consistency-page">
+    <!-- 6.1 BETA 安全声明横幅 -->
+    <div class="beta-banner">
+      <span class="beta-banner-icon">⚠️</span>
+      <span class="beta-banner-text">BETA功能：巡检结果仅供参考，不会自动修改任何图片。</span>
+    </div>
+
     <!-- 头部 -->
     <div class="check-header">
       <div class="header-left">
@@ -45,6 +51,12 @@
 
     <!-- 结果面板 -->
     <div v-if="report" class="results-container">
+      <!-- 6.1 报告内 BETA 横幅 -->
+      <div class="beta-banner beta-banner--report">
+        <span class="beta-banner-icon">⚠️</span>
+        <span class="beta-banner-text">BETA功能：巡检结果仅供参考，不会自动修改任何图片。</span>
+      </div>
+
       <!-- 总览卡片 -->
       <div class="overview-row">
         <div class="score-card" :class="scoreClass">
@@ -109,6 +121,7 @@
           <div
             v-for="anomaly in report.anomalies"
             :key="anomaly.id"
+            v-show="!ignoredAnomalyIds.has(anomaly.id)"
             class="anomaly-card"
             :class="'anomaly--' + anomaly.severity"
           >
@@ -117,6 +130,9 @@
                 {{ severityLabel(anomaly.severity) }}
               </span>
               <span class="anomaly-type">{{ anomalyTypeLabel(anomaly.type) }}</span>
+              <button class="btn-ignore-anomaly" :disabled="ignoringAnomaly[anomaly.id]" @click="ignoreAnomaly(anomaly.id)">
+                {{ ignoringAnomaly[anomaly.id] ? '...' : '忽略' }}
+              </button>
             </div>
             <p class="anomaly-desc">{{ anomaly.description }}</p>
             <div class="anomaly-images">
@@ -157,6 +173,29 @@
         </div>
       </div>
 
+      <!-- 6.2 已忽略列表 -->
+      <div v-if="ignoredAnomalies.length > 0" class="section">
+        <h3 class="section-title">已忽略列表</h3>
+        <div class="anomaly-list">
+          <div
+            v-for="anomaly in ignoredAnomalies"
+            :key="'ignored-' + anomaly.id"
+            class="anomaly-card anomaly-card--ignored"
+          >
+            <div class="anomaly-header">
+              <span class="anomaly-severity" :class="'severity--' + anomaly.severity">
+                {{ severityLabel(anomaly.severity) }}
+              </span>
+              <span class="anomaly-type">{{ anomalyTypeLabel(anomaly.type) }}</span>
+              <button class="btn-restore-anomaly" @click="restoreAnomaly(anomaly.id)">
+                恢复
+              </button>
+            </div>
+            <p class="anomaly-desc">{{ anomaly.description }}</p>
+          </div>
+        </div>
+      </div>
+
       <!-- 全部一致 -->
       <div v-else class="all-clear">
         <span class="clear-icon">🎉</span>
@@ -170,6 +209,7 @@
 import { ref, computed, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { aiApi } from '@/api/ai'
+import client from '@/api/client'
 import type { ConsistencyReport, ConsistencyAnomaly } from '@/types/models'
 
 const router = useRouter()
@@ -182,6 +222,16 @@ const progress = ref(0)
 const report = ref<ConsistencyReport | null>(null)
 const checkError = ref(false)
 const selectedImage = ref<string | null>(null)
+
+// 6.2 忽略异常
+const ignoredAnomalyIds = ref<Set<string>>(new Set())
+const ignoringAnomaly = ref<Record<string, boolean>>({})
+const currentTaskId = ref<string>('')
+
+const ignoredAnomalies = computed(() => {
+  if (!report.value) return []
+  return report.value.anomalies.filter(a => ignoredAnomalyIds.value.has(a.id))
+})
 
 let progressTimer: ReturnType<typeof setInterval> | null = null
 let aborted = false
@@ -219,6 +269,23 @@ function exportPdf() {
   }, 100)
 }
 
+// 6.2 忽略异常
+async function ignoreAnomaly(anomalyId: string) {
+  ignoringAnomaly.value[anomalyId] = true
+  try {
+    await client.post(`/v1/ai/consistency-check/${currentTaskId.value}/ignore-anomaly`, { anomalyId })
+    ignoredAnomalyIds.value.add(anomalyId)
+  } catch (e) {
+    console.error('[ConsistencyCheck] Ignore anomaly failed:', e)
+  } finally {
+    delete ignoringAnomaly.value[anomalyId]
+  }
+}
+
+function restoreAnomaly(anomalyId: string) {
+  ignoredAnomalyIds.value.delete(anomalyId)
+}
+
 async function runCheck() {
   if (checking.value || !projectId.value) return
 
@@ -241,6 +308,7 @@ async function runCheck() {
   try {
     const res = await aiApi.runConsistencyCheck(projectId.value)
     const taskId = res.data.data.taskId
+    currentTaskId.value = taskId
 
     let result = null
     let attempts = 0
@@ -286,6 +354,64 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+}
+
+// 6.1 BETA 安全声明
+.beta-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  background: linear-gradient(135deg, rgba(#667eea, 0.1), rgba(#764ba2, 0.1));
+  border-bottom: 1px solid rgba(#667eea, 0.2);
+  flex-shrink: 0;
+}
+
+.beta-banner--report {
+  margin-bottom: 16px;
+  border-radius: $radius-md;
+  border: 1px solid rgba(#667eea, 0.2);
+}
+
+.beta-banner-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+.beta-banner-text {
+  font-size: 13px;
+  color: $color-text-secondary;
+  font-weight: 500;
+}
+
+// 6.2 忽略按钮
+.btn-ignore-anomaly {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: $color-text-muted;
+  border: 1px solid $color-border;
+  border-radius: $radius-sm;
+  transition: all 0.15s;
+  &:hover:not(:disabled) { color: $color-text-secondary; border-color: $color-text-muted; background: $color-surface-hover; }
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+
+.btn-restore-anomaly {
+  margin-left: auto;
+  padding: 4px 12px;
+  font-size: 12px;
+  color: $color-primary;
+  border: 1px solid $color-primary;
+  border-radius: $radius-sm;
+  transition: all 0.15s;
+  &:hover { background: rgba($color-primary, 0.08); }
+}
+
+.anomaly-card--ignored {
+  opacity: 0.5;
+  background: $color-bg;
+  border-left-color: $color-text-muted;
 }
 
 .check-header {

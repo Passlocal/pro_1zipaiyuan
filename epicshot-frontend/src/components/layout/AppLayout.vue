@@ -39,6 +39,12 @@
 
     <main class="main-content">
       <header class="top-bar">
+        <!-- 12.1 登录过期预警 -->
+        <div v-if="tokenWarning" class="token-warning-banner">
+          <span class="token-warning-icon">⏰</span>
+          <span class="token-warning-text">登录即将过期，请保存当前工作。</span>
+          <button class="token-warning-refresh" @click="refreshLogin">立即刷新登录</button>
+        </div>
         <div class="breadcrumb">
           <slot name="breadcrumb" />
         </div>
@@ -62,9 +68,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import client from '@/api/client'
 import NotificationBell from '@/components/common/NotificationBell.vue'
 
 const route = useRoute()
@@ -74,6 +81,29 @@ const auth = useAuthStore()
 const sidebarCollapsed = ref(false)
 
 const showBack = computed(() => route.path !== '/')
+
+// 12.1 登录过期预警
+const tokenWarning = ref(false)
+let tokenCheckTimer: ReturnType<typeof setInterval> | null = null
+
+async function checkTokenStatus() {
+  try {
+    const res = await client.get('/v1/auth/token-status')
+    if (res.data?.data?.warning === true) {
+      tokenWarning.value = true
+    } else {
+      tokenWarning.value = false
+    }
+  } catch {
+    // 静默失败
+  }
+}
+
+function refreshLogin() {
+  // 触发登录刷新机制
+  tokenWarning.value = false
+  auth.logout()
+}
 
 const defaultAvatar = 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzIiIGhlaWdodD0iMzIiIHZpZXdCb3g9IjAgMCAzMiAzMiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48Y2lyY2xlIGN4PSIxNiIgY3k9IjE2IiByPSIxNiIgZmlsbD0iI2U4ZWFlZCIvPjxjaXJjbGUgY3g9IjE2IiBjeT0iMTIiIHI9IjYiIGZpbGw9IiM5YWEwYTYiLz48ZWxsaXBzZSBjeD0iMTYiIGN5PSIyNiIgcng9IjEwIiByeT0iNiIgZmlsbD0iIzlhYTBhNiIvPjwvc3ZnPg=='
 
@@ -98,6 +128,16 @@ function isActive(path: string) {
 function goBack() {
   router.back()
 }
+
+onMounted(() => {
+  // 12.1 每60秒检查一次token状态
+  checkTokenStatus()
+  tokenCheckTimer = setInterval(checkTokenStatus, 60000)
+})
+
+onUnmounted(() => {
+  if (tokenCheckTimer) clearInterval(tokenCheckTimer)
+})
 </script>
 
 <style lang="scss" scoped>
@@ -225,6 +265,44 @@ function goBack() {
   justify-content: space-between;
   padding: 0 20px;
   flex-shrink: 0;
+  position: relative;
+}
+
+// 12.1 登录过期预警
+.token-warning-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  background: #fef3c7;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  z-index: 10;
+  font-size: 13px;
+  border-bottom: 1px solid #f59e0b;
+}
+
+.token-warning-icon {
+  font-size: 14px;
+}
+
+.token-warning-text {
+  color: #92400e;
+  font-weight: 500;
+}
+
+.token-warning-refresh {
+  padding: 3px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  background: #f59e0b;
+  border-radius: $radius-sm;
+  transition: background 0.15s;
+  &:hover { background: #d97706; }
 }
 
 .breadcrumb {

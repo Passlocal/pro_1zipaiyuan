@@ -75,7 +75,36 @@
     <div v-if="showComparison" class="modal-overlay" @click.self="showComparison = false">
       <div class="comparison-modal">
         <h2 class="modal-title">版本对比</h2>
-        <div class="comparison-images">
+
+        <!-- 9.1 对比模式切换 -->
+        <div class="compare-mode-tabs">
+          <button
+            class="mode-tab"
+            :class="{ active: compareMode === 'side-by-side' }"
+            @click="compareMode = 'side-by-side'"
+          >左右并排</button>
+          <button
+            class="mode-tab"
+            :class="{ active: compareMode === 'slider' }"
+            @click="compareMode = 'slider'"
+          >滑块对比</button>
+          <button
+            class="mode-tab"
+            :class="{ active: compareMode === 'overlay' }"
+            @click="compareMode = 'overlay'"
+          >叠加对比</button>
+        </div>
+
+        <!-- 9.2 修改区域高亮开关 -->
+        <div class="highlight-toggle-row">
+          <label class="highlight-toggle">
+            <input type="checkbox" v-model="showModifiedAreas" />
+            <span class="highlight-toggle-label">显示修改区域</span>
+          </label>
+        </div>
+
+        <!-- 左右并排模式 -->
+        <div v-if="compareMode === 'side-by-side'" class="comparison-images">
           <div class="comparison-side">
             <p class="comparison-label">修改前</p>
             <div class="comparison-img-wrap">
@@ -103,16 +132,85 @@
             </div>
           </div>
         </div>
-        <div class="overlay-slider">
-          <input
-            type="range"
-            min="0"
-            max="100"
-            v-model="overlayValue"
-            class="slider-input"
-          />
-          <span class="slider-label">叠加对比: {{ overlayValue }}%</span>
+
+        <!-- 滑块对比模式 -->
+        <div v-else-if="compareMode === 'slider'" class="compare-area">
+          <div class="compare-container">
+            <img
+              v-if="selectedRevision?.uploadedImageUrl"
+              :src="selectedRevision.uploadedImageUrl"
+              alt="修改后"
+              class="compare-img compare-after"
+            />
+            <div class="compare-before-wrap" :style="{ clipPath: 'inset(0 ' + (100 - overlayValue) + '% 0 0)' }">
+              <div class="comparison-placeholder">
+                <span>📷</span>
+                <p>修改前</p>
+              </div>
+            </div>
+            <div class="compare-slider-line" :style="{ left: overlayValue + '%' }"></div>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              v-model.number="overlayValue"
+              class="compare-slider-input"
+            />
+          </div>
+          <div class="compare-labels">
+            <span>修改前</span>
+            <span>修改后</span>
+          </div>
         </div>
+
+        <!-- 9.1 叠加对比模式 -->
+        <div v-else class="overlay-compare-area">
+          <div class="overlay-compare-container">
+            <img
+              v-if="selectedRevision?.uploadedImageUrl"
+              :src="selectedRevision.uploadedImageUrl"
+              alt="修改后"
+              class="overlay-img overlay-after"
+            />
+            <div class="overlay-img overlay-before" :style="{ opacity: overlayValue / 100 }">
+              <div class="comparison-placeholder">
+                <span>📷</span>
+                <p>修改前</p>
+              </div>
+            </div>
+            <!-- 9.2 修改区域高亮 -->
+            <div
+              v-if="showModifiedAreas && selectedRevision?.paramChanges"
+              class="modified-area-overlay"
+            >
+              <div
+                v-for="(pc, pIdx) in selectedRevision.paramChanges"
+                :key="'mod-' + pIdx"
+                class="modified-area-dash"
+                :style="{
+                  left: ((pIdx + 1) * 15) % 80 + '%',
+                  top: ((pIdx + 1) * 20) % 70 + '%',
+                  width: (12 + pIdx * 3) + '%',
+                  height: (10 + pIdx * 2) + '%'
+                }"
+              >
+                <span class="modified-area-tag">{{ pc.key }}{{ pc.value > 0 ? '+' : '' }}{{ pc.value }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="overlay-slider-bar">
+            <span class="overlay-label">叠加透明度</span>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              v-model.number="overlayValue"
+              class="slider-input"
+            />
+            <span class="overlay-value">{{ overlayValue }}%</span>
+          </div>
+        </div>
+
         <div v-if="selectedRevision?.paramChanges && selectedRevision.paramChanges.length > 0" class="param-changes">
           <h3 class="param-title">参数变更</h3>
           <div class="param-list">
@@ -153,6 +251,12 @@ function handleExportPdf() {
 const showComparison = ref(false)
 const selectedRevision = ref<TimelineNode | null>(null)
 const overlayValue = ref(50)
+
+// 9.1 对比模式
+const compareMode = ref<'side-by-side' | 'slider' | 'overlay'>('side-by-side')
+
+// 9.2 修改区域高亮
+const showModifiedAreas = ref(false)
 
 // Date range filter
 const dateFrom = ref('')
@@ -496,7 +600,7 @@ onMounted(() => {
   background: $color-surface;
   border-radius: $radius-xl;
   padding: 28px 32px;
-  width: 720px;
+  width: 780px;
   max-height: 90vh;
   overflow-y: auto;
   animation: slideUp 0.3s ease;
@@ -506,9 +610,202 @@ onMounted(() => {
   font-size: 18px;
   font-weight: 600;
   color: $color-text;
-  margin-bottom: 20px;
+  margin-bottom: 16px;
 }
 
+// 9.1 对比模式切换
+.compare-mode-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  background: $color-surface-hover;
+  border-radius: $radius-md;
+  padding: 3px;
+}
+
+.mode-tab {
+  flex: 1;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  color: $color-text-secondary;
+  border-radius: $radius-sm;
+  transition: all 0.15s;
+  &:hover { color: $color-text; }
+  &.active {
+    background: $color-surface;
+    color: $color-primary;
+    box-shadow: $shadow-sm;
+  }
+}
+
+// 9.2 修改区域高亮开关
+.highlight-toggle-row {
+  margin-bottom: 16px;
+}
+
+.highlight-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: $color-text-secondary;
+
+  input[type="checkbox"] {
+    accent-color: $color-primary;
+  }
+}
+
+.highlight-toggle-label {
+  user-select: none;
+}
+
+// 滑块对比容器
+.compare-area {
+  margin-bottom: 16px;
+}
+
+.compare-container {
+  position: relative;
+  width: 100%;
+  height: 300px;
+  border-radius: $radius-md;
+  overflow: hidden;
+  background: #1a1a2e;
+}
+
+.compare-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.compare-before-wrap {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.compare-slider-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: $color-primary;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.compare-slider-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: col-resize;
+  z-index: 3;
+  margin: 0;
+}
+
+.compare-labels {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 12px 0;
+  font-size: 12px;
+  color: $color-text-muted;
+}
+
+// 9.1 叠加对比
+.overlay-compare-area {
+  margin-bottom: 16px;
+}
+
+.overlay-compare-container {
+  position: relative;
+  width: 100%;
+  height: 300px;
+  border-radius: $radius-md;
+  overflow: hidden;
+  background: #1a1a2e;
+}
+
+.overlay-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.overlay-after {
+  z-index: 1;
+}
+
+.overlay-before {
+  z-index: 2;
+  transition: opacity 0.2s ease;
+}
+
+.overlay-slider-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+}
+
+.overlay-label {
+  font-size: 12px;
+  color: $color-text-muted;
+  white-space: nowrap;
+}
+
+.overlay-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: $color-text;
+  min-width: 36px;
+}
+
+// 9.2 修改区域高亮
+.modified-area-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.modified-area-dash {
+  position: absolute;
+  border: 2px dashed rgba($color-warning, 0.7);
+  border-radius: 2px;
+  background: rgba($color-warning, 0.08);
+}
+
+.modified-area-tag {
+  position: absolute;
+  top: -20px;
+  left: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba($color-warning, 0.9);
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+
+// 左右并排对比
 .comparison-images {
   display: flex;
   gap: 16px;
@@ -576,22 +873,9 @@ onMounted(() => {
   }
 }
 
-.overlay-slider {
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
 .slider-input {
   flex: 1;
   accent-color: $color-primary;
-}
-
-.slider-label {
-  font-size: 13px;
-  color: $color-text-secondary;
-  white-space: nowrap;
 }
 
 .param-changes {

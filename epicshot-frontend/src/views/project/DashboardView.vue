@@ -39,16 +39,43 @@
           {{ tab.label }}
         </button>
       </div>
-      <div class="search-wrap">
-        <input
-          v-model="searchQuery"
-          type="text"
-          class="search-input"
-          placeholder="搜索项目名称或客户..."
-          @input="onSearchInput"
-        />
-        <span class="search-icon">🔍</span>
+      <div class="filter-right">
+        <div class="search-wrap">
+          <input
+            v-model="searchQuery"
+            type="text"
+            class="search-input"
+            placeholder="搜索项目名称或客户..."
+            @input="onSearchInput"
+          />
+          <span class="search-icon">🔍</span>
+        </div>
+        <label class="toggle-unprocessed">
+          <input type="checkbox" v-model="showUnprocessedOnly" />
+          <span class="toggle-label">仅未处理</span>
+        </label>
+        <div class="sort-wrap">
+          <select v-model="sortBy" class="sort-select">
+            <option value="updatedAt">更新时间</option>
+            <option value="deadline">截止日期</option>
+            <option value="createdAt">创建时间</option>
+            <option value="clientName">客户名称</option>
+          </select>
+        </div>
+        <div class="template-wrap">
+          <button class="btn-template" @click="saveTemplate">保存为模板</button>
+          <select v-model="selectedTemplate" class="template-select" @change="loadTemplate">
+            <option value="">加载模板...</option>
+            <option v-for="t in savedTemplates" :key="t.id" :value="t.id">{{ t.name }}</option>
+          </select>
+        </div>
       </div>
+    </div>
+
+    <!-- 筛选状态提示条 -->
+    <div v-if="hasActiveFilter" class="filter-status-bar">
+      <span>正在按「{{ filterDescription }}」筛选，共 {{ filteredProjects.length }} 个项目。</span>
+      <button class="btn-clear-filter" @click="clearAllFilters">清除筛选</button>
     </div>
 
     <!-- 项目卡片网格 -->
@@ -67,7 +94,7 @@
     </div>
     <div v-else class="project-grid">
       <div
-        v-for="project in filteredProjects"
+        v-for="project in sortedProjects"
         :key="project.id"
         class="project-card"
         @click="goToProject(project.id)"
@@ -189,6 +216,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import { projectApi } from '@/api/projects'
+import client from '@/api/client'
 import { useToast } from '@/composables/useToast'
 import type { ProjectStatus } from '@/types/models'
 import { PROJECT_STATUS_LABELS } from '@/types/models'
@@ -210,7 +238,13 @@ const filterTabs = [
 ]
 const activeStatus = ref('')
 const searchQuery = ref('')
+const showUnprocessedOnly = ref(false)
+const sortBy = ref('updatedAt')
 let searchTimer: ReturnType<typeof setTimeout> | null = null
+
+// 行话模板
+const savedTemplates = ref<Array<{ id: string; name: string; keywords: string }>>([])
+const selectedTemplate = ref('')
 
 const statusLabelMap: Record<ProjectStatus, string> = PROJECT_STATUS_LABELS
 
@@ -253,8 +287,76 @@ const filteredProjects = computed(() => {
         (p.clientName || '').toLowerCase().includes(q)
     )
   }
+  if (showUnprocessedOnly.value) {
+    list = list.filter((p) => (p.pendingCount || 0) > 0)
+  }
   return list
 })
+
+const sortedProjects = computed(() => {
+  const list = [...filteredProjects.value]
+  const key = sortBy.value
+  list.sort((a: any, b: any) => {
+    const va = a[key] || ''
+    const vb = b[key] || ''
+    if (key === 'clientName') {
+      return va.localeCompare(vb, 'zh-CN')
+    }
+    return vb > va ? 1 : -1
+  })
+  return list
+})
+
+const hasActiveFilter = computed(() => {
+  return searchQuery.value.trim().length > 0 || showUnprocessedOnly.value
+})
+
+const filterDescription = computed(() => {
+  const parts: string[] = []
+  if (searchQuery.value.trim()) parts.push(searchQuery.value.trim())
+  if (showUnprocessedOnly.value) parts.push('仅未处理')
+  return parts.join(' + ')
+})
+
+function clearAllFilters() {
+  searchQuery.value = ''
+  showUnprocessedOnly.value = false
+}
+
+// 行话模板
+async function saveTemplate() {
+  const kw = searchQuery.value.trim()
+  if (!kw) {
+    toast.error('请先输入筛选关键词再保存为模板')
+    return
+  }
+  const name = kw.length > 10 ? kw.slice(0, 10) + '...' : kw
+  try {
+    await client.post('/v1/personal-jargon-templates', { name, keywords: kw })
+    toast.success('模板已保存')
+    await loadTemplates()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || '保存失败')
+  }
+}
+
+async function loadTemplates() {
+  try {
+    const res = await client.get('/v1/personal-jargon-templates')
+    savedTemplates.value = res.data?.data || []
+  } catch {
+    // ignore
+  }
+}
+
+function loadTemplate() {
+  if (!selectedTemplate.value) return
+  const t = savedTemplates.value.find(t => t.id === selectedTemplate.value)
+  if (t) {
+    searchQuery.value = t.keywords
+  }
+  selectedTemplate.value = ''
+}
 
 // Fetch first image of each project as thumbnail
 const projectThumbnails = ref<Record<string, string>>({})
@@ -400,6 +502,7 @@ async function handleCreate() {
 
 onMounted(async () => {
   await loadProjects()
+  loadTemplates()
 })
 
 onUnmounted(() => {
@@ -485,6 +588,14 @@ onUnmounted(() => {
   justify-content: space-between;
   margin-bottom: 20px;
   gap: 16px;
+  flex-wrap: wrap;
+}
+
+.filter-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .filter-tabs {
@@ -549,6 +660,114 @@ onUnmounted(() => {
   font-size: 14px;
   opacity: 0.5;
   pointer-events: none;
+}
+
+// 仅未处理开关
+.toggle-unprocessed {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: $color-text-secondary;
+  white-space: nowrap;
+  user-select: none;
+
+  input[type="checkbox"] {
+    cursor: pointer;
+  }
+}
+
+// 排序下拉
+.sort-wrap {
+  flex-shrink: 0;
+}
+
+.sort-select {
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  font-size: 13px;
+  color: $color-text;
+  background: $color-surface;
+  cursor: pointer;
+  outline: none;
+
+  &:focus {
+    border-color: $color-primary;
+  }
+}
+
+// 行话模板
+.template-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-template {
+  height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+  color: $color-primary;
+  background: rgba($color-primary, 0.08);
+  border: 1px solid rgba($color-primary, 0.2);
+  border-radius: $radius-md;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+
+  &:hover {
+    background: rgba($color-primary, 0.15);
+  }
+}
+
+.template-select {
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  font-size: 13px;
+  color: $color-text;
+  background: $color-surface;
+  cursor: pointer;
+  outline: none;
+  min-width: 100px;
+
+  &:focus {
+    border-color: $color-primary;
+  }
+}
+
+// 筛选状态提示条
+.filter-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  margin-bottom: 16px;
+  background: #e8f0fe;
+  border: 1px solid rgba($color-primary, 0.2);
+  border-radius: $radius-md;
+  font-size: 13px;
+  color: $color-primary;
+}
+
+.btn-clear-filter {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: $color-primary;
+  background: transparent;
+  border: 1px solid $color-primary;
+  border-radius: $radius-sm;
+  cursor: pointer;
+  transition: all 0.15s;
+
+  &:hover {
+    background: $color-primary;
+    color: #fff;
+  }
 }
 
 .loading-state {

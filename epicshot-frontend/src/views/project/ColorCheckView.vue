@@ -59,6 +59,22 @@
       <div class="results-summary">
         <span>共 {{ report.totalImages }} 张图片，</span>
         <span class="abnormal-count">{{ report.abnormalCount }} 张异常</span>
+        <div class="batch-actions">
+          <button
+            class="btn-batch-apply"
+            :disabled="selectedIds.size === 0 || applyingBatch"
+            @click="applySelected"
+          >
+            {{ applyingBatch ? '应用中...' : `应用修正于选中项 (${selectedIds.size})` }}
+          </button>
+          <button
+            class="btn-batch-apply-all"
+            :disabled="applyingAll"
+            @click="applyAll"
+          >
+            {{ applyingAll ? '应用中...' : '一键应用全部' }}
+          </button>
+        </div>
       </div>
       <div class="results-list">
         <div
@@ -66,6 +82,13 @@
           :key="item.imageId"
           class="result-item"
         >
+          <div class="result-checkbox">
+            <input
+              type="checkbox"
+              :checked="selectedIds.has(item.imageId)"
+              @change="toggleSelect(item.imageId)"
+            />
+          </div>
           <div class="result-thumbnail">
             <img v-if="item.thumbnailUrl" :src="item.thumbnailUrl" :alt="item.imageId" />
             <div v-else class="thumb-placeholder">
@@ -161,6 +184,7 @@
 import { ref, computed, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { aiApi } from '@/api/ai'
+import client from '@/api/client'
 import { useProjectStore } from '@/stores/project'
 import type { ColorCheckReport, ColorCheckItem } from '@/types/models'
 
@@ -180,6 +204,9 @@ const compareSlider = ref(50)
 const compareItem = ref<ColorCheckItem | null>(null)
 const selectedScene = ref('ecommerce_white')
 const appliedCorrections = ref<Set<string>>(new Set())
+const selectedIds = ref<Set<string>>(new Set())
+const applyingBatch = ref(false)
+const applyingAll = ref(false)
 
 const scenePresets = [
   { key: 'ecommerce_white', label: '电商白底图' },
@@ -235,6 +262,47 @@ function applyCorrection(item: ColorCheckItem) {
   appliedCorrections.value.add(item.imageId)
   // 模拟AI后台修正
   console.log('[ColorCheck] Applied correction for:', item.imageId)
+}
+
+// 5.2 批量/单选混合应用
+function toggleSelect(imageId: string) {
+  const s = new Set(selectedIds.value)
+  if (s.has(imageId)) {
+    s.delete(imageId)
+  } else {
+    s.add(imageId)
+  }
+  selectedIds.value = s
+}
+
+async function applySelected() {
+  if (selectedIds.value.size === 0) return
+  applyingBatch.value = true
+  try {
+    const ids = Array.from(selectedIds.value)
+    await client.post('/v1/ai/color-check/apply-selected', { imageIds: ids })
+    ids.forEach(id => appliedCorrections.value.add(id))
+    selectedIds.value = new Set()
+  } catch (e) {
+    console.error('[ColorCheck] Batch apply failed:', e)
+  } finally {
+    applyingBatch.value = false
+  }
+}
+
+async function applyAll() {
+  applyingAll.value = true
+  try {
+    if (report.value) {
+      const ids = report.value.items.map(i => i.imageId)
+      await client.post('/v1/ai/color-check/apply-selected', { imageIds: ids })
+      ids.forEach(id => appliedCorrections.value.add(id))
+    }
+  } catch (e) {
+    console.error('[ColorCheck] Apply all failed:', e)
+  } finally {
+    applyingAll.value = false
+  }
 }
 
 let aborted = false
@@ -505,10 +573,57 @@ onUnmounted(() => {
   background: $color-surface;
   border-bottom: 1px solid $color-border-light;
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
 
   .abnormal-count {
     color: $color-error;
     font-weight: 600;
+  }
+}
+
+.batch-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.btn-batch-apply {
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background: $color-primary;
+  border-radius: $radius-sm;
+  transition: background 0.15s;
+  &:hover:not(:disabled) { background: $color-primary-dark; }
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+
+.btn-batch-apply-all {
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #fff;
+  background: $color-success;
+  border-radius: $radius-sm;
+  transition: background 0.15s;
+  &:hover:not(:disabled) { background: #2d9249; }
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+
+.result-checkbox {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+
+  input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    accent-color: $color-primary;
+    cursor: pointer;
   }
 }
 

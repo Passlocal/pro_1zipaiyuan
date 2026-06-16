@@ -146,7 +146,45 @@ export interface CommentCard {
   assigneeId?: string
   disputeCount: number
   disputed: boolean
+  draftText?: string
+  lastEditedBy?: string
+  lastEditedAt?: string
   createdAt: string
+}
+
+// ============ 图片讨论 ============
+export interface ImageDiscussion {
+  id: string
+  imageId: string
+  userId: string
+  userName: string
+  userAvatar?: string
+  text: string
+  mentions: string[]
+  createdAt: string
+}
+
+// ============ 最近操作 ============
+export interface RecentAction {
+  id: string
+  projectId: string
+  userId: string
+  userName: string
+  actionType: string
+  description: string
+  undoable: boolean
+  createdAt: string
+}
+
+// ============ 抽查 ============
+export interface ReviewCard {
+  id: string
+  text: string
+  imageId: string
+  thumbnailUrl?: string
+  status: string
+  resolvedBy?: string
+  resolvedAt?: string
 }
 
 // ============ AI功能 ============
@@ -394,5 +432,6 @@ export interface MyTask {
   projectId: string
   thumbnailUrl: string
   priority: TaskPriority
+  estimatedTime?: number
   createdAt: string
 }

@@ -32,7 +32,13 @@
           <span class="dot dot--yellow"></span>
           <span class="dot dot--green"></span>
           项目健康度
+          <button class="btn-help" @click.stop="healthRulesVisible = !healthRulesVisible">?</button>
         </h2>
+        <div v-if="healthRulesVisible" class="health-rules-popover">
+          <p>🔴 红灯：严重超期 / 存在争议 / 客户卡顿超过阈值</p>
+          <p>🟡 黄灯：即将到期 / 有未读反馈</p>
+          <p>🟢 绿灯：一切正常</p>
+        </div>
         <div v-if="loading" class="loading-state">加载中...</div>
         <div v-else-if="projects.length === 0" class="empty-state">
           <p>暂无进行中的项目</p>
@@ -60,6 +66,16 @@
               <span v-if="proj.unresolvedCount" class="count-badge">{{ proj.unresolvedCount }} 待处理</span>
               <span v-if="proj.disputedCount" class="count-badge count-badge--dispute">{{ proj.disputedCount }} 争议</span>
             </div>
+            <button
+              v-if="proj.health === 'red' || proj.health === 'yellow'"
+              class="btn-nudge"
+              :disabled="nudgeStatus[proj.id]?.loading"
+              @click.stop="nudgeClient(proj)"
+            >
+              <template v-if="nudgeStatus[proj.id]?.done">已催稿 {{ nudgeStatus[proj.id]?.time }}</template>
+              <template v-else-if="nudgeStatus[proj.id]?.loading">催稿中...</template>
+              <template v-else>提醒客户</template>
+            </button>
           </div>
         </div>
       </section>
@@ -76,7 +92,7 @@
               <span class="member-role">{{ m.role === 'owner' ? '拥有者' : '编辑者' }}</span>
             </div>
             <div class="member-load">
-              <span class="load-count">{{ m.taskCount }}</span>
+              <span class="load-count">{{ m.taskCount }} / {{ memberLoadLimit }}</span>
               <span class="load-label">待办</span>
             </div>
           </div>
@@ -87,8 +103,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import client from '@/api/client'
 import { dashboardApi } from '@/api/dashboard'
 import { PROJECT_STATUS_LABELS } from '@/types/models'
 import type { DashboardStats, ProjectHealth, MemberLoad } from '@/types/models'
@@ -98,6 +115,9 @@ const loading = ref(true)
 const stats = ref<DashboardStats>({ total: 0, active: 0, red: 0, yellow: 0, totalUnresolved: 0 })
 const projects = ref<ProjectHealth[]>([])
 const memberLoads = ref<MemberLoad[]>([])
+const healthRulesVisible = ref(false)
+const memberLoadLimit = ref(15)
+const nudgeStatus = reactive<Record<string, { loading?: boolean; done?: boolean; time?: string }>>({})
 
 function statusLabel(status: string): string {
   return PROJECT_STATUS_LABELS[status as keyof typeof PROJECT_STATUS_LABELS] || status
@@ -105,6 +125,20 @@ function statusLabel(status: string): string {
 
 function goToProject(id: string) {
   router.push('/project/' + id)
+}
+
+async function nudgeClient(proj: ProjectHealth) {
+  if (nudgeStatus[proj.id]?.loading || nudgeStatus[proj.id]?.done) return
+  nudgeStatus[proj.id] = { loading: true }
+  try {
+    await client.post(`/v1/projects/${proj.id}/nudge`)
+    const now = new Date()
+    const time = now.getHours().toString().padStart(2, '0') + ':' + now.getMinutes().toString().padStart(2, '0')
+    nudgeStatus[proj.id] = { done: true, time }
+  } catch (e) {
+    console.error('[WarRoom] nudge failed', e)
+    delete nudgeStatus[proj.id]
+  }
 }
 
 onMounted(async () => {
@@ -118,6 +152,16 @@ onMounted(async () => {
     console.error('[WarRoom] load failed', e)
   } finally {
     loading.value = false
+  }
+
+  // load member load limit from workspace
+  try {
+    const wsRes = await client.get('/v1/workspace')
+    if (wsRes.data?.data?.memberLoadLimit) {
+      memberLoadLimit.value = wsRes.data.data.memberLoadLimit
+    }
+  } catch {
+    // ignore, use default 15
   }
 })
 </script>
@@ -295,6 +339,69 @@ onMounted(async () => {
   &--dispute {
     background: #fce8e6;
     color: #c5221f;
+  }
+}
+
+// 健康度规则弹窗
+.btn-help {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1px solid $color-border;
+  background: $color-surface-hover;
+  color: $color-text-secondary;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  transition: all 0.15s;
+
+  &:hover {
+    background: $color-border-light;
+    color: $color-text;
+  }
+}
+
+.health-rules-popover {
+  background: $color-surface;
+  border: 1px solid $color-border-light;
+  border-radius: $radius-md;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  box-shadow: $shadow-md;
+
+  p {
+    font-size: 13px;
+    color: $color-text;
+    line-height: 1.8;
+    margin: 0;
+  }
+}
+
+// 催稿按钮
+.btn-nudge {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: $color-primary;
+  background: rgba($color-primary, 0.08);
+  border: 1px solid rgba($color-primary, 0.2);
+  border-radius: $radius-sm;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+
+  &:hover:not(:disabled) {
+    background: rgba($color-primary, 0.15);
+    border-color: $color-primary;
+  }
+
+  &:disabled {
+    opacity: 0.7;
+    cursor: default;
   }
 }
 

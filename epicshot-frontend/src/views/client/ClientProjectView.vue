@@ -53,6 +53,8 @@
             v-for="(card, idx) in cards"
             :key="card.id"
             class="comment-card"
+            @mouseenter="startCardViewTimer(card.id)"
+            @mouseleave="stopCardViewTimer(card.id)"
           >
             <div class="card-header">
               <span class="card-index">#{{ idx + 1 }}</span>
@@ -65,6 +67,7 @@
             </div>
             <div class="card-body">
               <p class="card-text">{{ card.text }}</p>
+              <span v-if="cardReadReceipts[card.id]" class="card-read-receipt">✓ 对方已读</span>
             </div>
             <div class="card-actions">
               <div class="card-reply-row">
@@ -144,6 +147,20 @@
               <img :src="originalImageUrl || currentImageUrl" alt="修改前" class="compare-img compare-before" />
             </div>
             <div class="compare-slider-line" :style="{ left: compareSlider + '%' }"></div>
+            <!-- 7.3 修改区域高亮 -->
+            <div
+              v-for="(area, aIdx) in modifiedAreas"
+              :key="'area-' + aIdx"
+              class="modified-area-highlight"
+              :style="{
+                left: area.x + '%',
+                top: area.y + '%',
+                width: area.w + '%',
+                height: area.h + '%'
+              }"
+            >
+              <span class="modified-area-label">{{ area.label }}</span>
+            </div>
             <input
               type="range"
               min="0"
@@ -185,9 +202,28 @@
           <button
             class="btn-confirm"
             :disabled="confirming"
-            @click="confirmAll"
+            @click="onFirstConfirm"
           >
             {{ confirming ? '提交中...' : '确稿' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7.2 二次确稿确认弹窗 -->
+    <div v-if="showSecondConfirmModal" class="modal-overlay" @click.self="showSecondConfirmModal = false">
+      <div class="modal-content">
+        <span class="modal-icon">⚠️</span>
+        <h3 class="modal-title">最后确认</h3>
+        <p class="modal-text">确稿后如需修改需联系摄影师申请。确认提交吗？</p>
+        <div class="modal-actions modal-actions--center">
+          <button class="btn-cancel" @click="showSecondConfirmModal = false">再想想</button>
+          <button
+            class="btn-confirm"
+            :disabled="confirming"
+            @click="confirmAll"
+          >
+            {{ confirming ? '提交中...' : '确认提交' }}
           </button>
         </div>
       </div>
@@ -217,14 +253,38 @@
           placeholder="请描述需要修改的内容..."
           rows="3"
         ></textarea>
+        <p v-if="modifyRequestText.trim().length > 0 && modifyRequestText.trim().length < 5" class="modify-request-hint">
+          至少5个字
+        </p>
         <div class="modal-actions">
           <button class="btn-cancel" @click="showModifyRequestModal = false">取消</button>
           <button
             class="btn-confirm"
-            :disabled="!modifyRequestText.trim() || submittingRequest"
+            :disabled="modifyRequestText.trim().length < 5 || submittingRequest"
             @click="submitModifyRequest"
           >
             {{ submittingRequest ? '提交中...' : '提交申请' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 7.1 首次打开气泡引导 -->
+    <div v-if="showBubbleGuide" class="bubble-guide-overlay">
+      <div class="bubble-guide-card">
+        <div class="bubble-steps">
+          <span class="bubble-step-dot" :class="{ active: bubbleStep === 0 }"></span>
+          <span class="bubble-step-dot" :class="{ active: bubbleStep === 1 }"></span>
+          <span class="bubble-step-dot" :class="{ active: bubbleStep === 2 }"></span>
+        </div>
+        <p class="bubble-guide-text">{{ bubbleGuides[bubbleStep] }}</p>
+        <div class="bubble-guide-actions">
+          <button class="btn-bubble-skip" @click="skipBubbleGuide">跳过</button>
+          <button
+            class="btn-bubble-next"
+            @click="bubbleStep < 2 ? bubbleStep++ : finishBubbleGuide()"
+          >
+            {{ bubbleStep < 2 ? '下一步' : '完成' }}
           </button>
         </div>
       </div>
@@ -233,9 +293,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { projectApi } from '@/api/projects'
+import client from '@/api/client'
 import { useToast } from '@/composables/useToast'
 import type { Project, CommentCard, ImageMedia, ProjectStatus } from '@/types/models'
 import { PROJECT_STATUS_LABELS } from '@/types/models'
@@ -261,6 +322,25 @@ const modifyRequestText = ref('')
 const submittingRequest = ref(false)
 const replySubmitting = ref<Record<string, boolean>>({})
 const originalImageUrl = ref('')
+
+// 7.2 二次确稿
+const showSecondConfirmModal = ref(false)
+
+// 7.3 修改区域高亮 — 模拟数据，实际可从API获取
+const modifiedAreas = ref<{ x: number; y: number; w: number; h: number; label: string }[]>([])
+
+// 7.1 气泡引导
+const showBubbleGuide = ref(false)
+const bubbleStep = ref(0)
+const bubbleGuides = [
+  '双指缩放查看细节',
+  '点击画笔开始标注',
+  '写完意见点发送',
+]
+
+// 7.5 已读回执
+const cardReadReceipts = ref<Record<string, boolean>>({})
+const cardViewTimers = ref<Record<string, ReturnType<typeof setTimeout>>>({})
 
 const pendingCount = computed(() => {
   return cards.value.filter(c => cardStates.value[c.id] !== 'confirmed').length
@@ -338,6 +418,14 @@ async function fetchProject() {
     if (res.data.data.images && res.data.data.images.length > 0) {
       projectImages.value = res.data.data.images
     }
+    // 7.1 气泡引导检查
+    if ((res.data.data.project as any).clientFirstVisit === 'true') {
+      showBubbleGuide.value = true
+    }
+    // 7.3 加载修改区域（模拟）
+    if ((res.data.data as any).modifiedAreas) {
+      modifiedAreas.value = (res.data.data as any).modifiedAreas
+    }
     errorType.value = 'none'
   } catch (e: any) {
     console.error('获取项目失败:', e)
@@ -354,7 +442,7 @@ async function fetchProject() {
 }
 
 async function confirmAll() {
-  showPreviewModal.value = false
+  showSecondConfirmModal.value = false
   confirming.value = true
   try {
     if (project.value) {
@@ -367,6 +455,53 @@ async function confirmAll() {
   } finally {
     confirming.value = false
   }
+}
+
+// 7.2 二次确稿：先关闭预览弹窗，再打开二次确认
+function onFirstConfirm() {
+  showPreviewModal.value = false
+  showSecondConfirmModal.value = true
+}
+
+// 7.1 气泡引导
+function skipBubbleGuide() {
+  showBubbleGuide.value = false
+  finishBubbleVisit()
+}
+
+function finishBubbleGuide() {
+  showBubbleGuide.value = false
+  finishBubbleVisit()
+}
+
+async function finishBubbleVisit() {
+  if (!project.value) return
+  try {
+    await client.put(`/v1/projects/${project.value.id}/client-first-visit`, { firstVisit: false })
+  } catch { /* ignore */ }
+}
+
+// 7.5 已读回执
+function startCardViewTimer(cardId: string) {
+  if (cardViewTimers.value[cardId] || cardReadReceipts.value[cardId]) return
+  cardViewTimers.value[cardId] = setTimeout(() => {
+    sendReadReceipt(cardId)
+  }, 3000)
+}
+
+function stopCardViewTimer(cardId: string) {
+  const timer = cardViewTimers.value[cardId]
+  if (timer) {
+    clearTimeout(timer)
+    delete cardViewTimers.value[cardId]
+  }
+}
+
+async function sendReadReceipt(cardId: string) {
+  try {
+    await client.post(`/v1/comment-cards/${cardId}/read-receipt`)
+    cardReadReceipts.value[cardId] = true
+  } catch { /* ignore */ }
 }
 
 function goToDownload() {
@@ -403,6 +538,12 @@ onMounted(() => {
     if (saved) cardStates.value = JSON.parse(saved)
   } catch { /* ignore */ }
   fetchProject()
+})
+
+onUnmounted(() => {
+  // 清理所有已读回执计时器
+  Object.values(cardViewTimers.value).forEach(t => clearTimeout(t))
+  cardViewTimers.value = {}
 })
 </script>
 
@@ -1087,5 +1228,120 @@ onMounted(() => {
   color: $color-primary;
   padding: 4px 0;
   &:hover { text-decoration: underline; }
+}
+
+// 7.4 修改理由验证
+.modify-request-hint {
+  font-size: 12px;
+  color: $color-error;
+  margin: -12px 0 12px 0;
+  text-align: left;
+}
+
+// 7.5 已读回执
+.card-read-receipt {
+  font-size: 11px;
+  color: $color-success;
+  margin-top: 4px;
+  display: block;
+}
+
+// 7.1 气泡引导
+.bubble-guide-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  animation: fadeIn 0.3s ease;
+}
+
+.bubble-guide-card {
+  background: $color-surface;
+  border-radius: $radius-xl;
+  padding: 32px 40px;
+  text-align: center;
+  max-width: 360px;
+  width: 90%;
+  animation: slideUp 0.3s ease;
+}
+
+.bubble-steps {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.bubble-step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: $color-border-light;
+  transition: background 0.2s;
+
+  &.active {
+    background: $color-primary;
+    transform: scale(1.2);
+  }
+}
+
+.bubble-guide-text {
+  font-size: 16px;
+  font-weight: 600;
+  color: $color-text;
+  margin-bottom: 24px;
+  line-height: 1.5;
+}
+
+.bubble-guide-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
+
+.btn-bubble-skip {
+  padding: 8px 20px;
+  font-size: 14px;
+  color: $color-text-muted;
+  background: $color-surface;
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  &:hover { background: $color-surface-hover; }
+}
+
+.btn-bubble-next {
+  padding: 8px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: $color-primary;
+  border-radius: $radius-md;
+  &:hover { background: $color-primary-dark; }
+}
+
+// 7.3 修改区域高亮
+.modified-area-highlight {
+  position: absolute;
+  border: 2px dashed rgba($color-warning, 0.6);
+  border-radius: 2px;
+  z-index: 4;
+  pointer-events: none;
+  background: rgba($color-warning, 0.1);
+}
+
+.modified-area-label {
+  position: absolute;
+  top: -20px;
+  left: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #fff;
+  background: rgba($color-warning, 0.9);
+  padding: 2px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
 }
 </style>

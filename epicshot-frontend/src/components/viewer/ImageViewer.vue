@@ -40,13 +40,36 @@
       </svg>
     </button>
 
+    <!-- 4.3: 旋转按钮 -->
+    <button class="image-viewer__rotate-btn" @click.stop="rotateImage" :title="'旋转 (' + (rotationAngle % 360) + '°)'" aria-label="旋转图片">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="23 4 23 10 17 10"/>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+      </svg>
+    </button>
+
     <!-- Long image position indicator -->
     <div v-if="isLongImage && !loading" class="image-viewer__position-indicator">
       {{ Math.round(positionPercent) }}%
     </div>
 
+    <!-- 4.7: 草稿恢复横幅 -->
+    <div v-if="showDraftBanner" class="image-viewer__draft-banner">
+      <span>检测到未提交的意见草稿，是否恢复？</span>
+      <button class="btn-draft-restore" @click="restoreDraft">恢复</button>
+      <button class="btn-draft-ignore" @click="ignoreDraft">忽略</button>
+    </div>
+
     <!-- Image + Canvas container -->
     <div class="image-viewer__stage" ref="stageRef">
+      <!-- 4.15: 模糊占位 -->
+      <img
+        v-if="!loading && blurSrc"
+        :src="blurSrc"
+        class="image-viewer__blur-placeholder"
+        :class="{ 'image-viewer__blur-placeholder--hidden': imageLoaded }"
+        :style="imageStyle"
+      />
       <img
         ref="imgRef"
         :src="imageUrl"
@@ -63,17 +86,52 @@
         :style="canvasStyle"
       ></canvas>
 
-      <!-- Text input overlay -->
-      <input
-        v-if="showTextInput"
-        ref="textInputRef"
-        v-model="textInputValue"
-        class="image-viewer__text-input"
-        :style="textInputStyle"
-        @blur="finalizeText"
-        @keyup.enter="finalizeText"
-        @keyup.escape="cancelText"
-      />
+      <!-- 4.5: 框选实时尺寸显示 -->
+      <div
+        v-if="showSizeOverlay"
+        class="image-viewer__size-overlay"
+        :style="sizeOverlayStyle"
+      >{{ sizeOverlayText }}</div>
+
+      <!-- 4.4: 文字工具预设短语 -->
+      <div v-if="showTextInput" class="image-viewer__text-toolbar" :style="textToolbarStyle">
+        <select
+          class="preset-phrase-select"
+          @change="onPresetPhraseSelected"
+          :value="''"
+        >
+          <option value="" disabled>预设短语</option>
+          <option v-for="phrase in presetPhrases" :key="phrase" :value="phrase">{{ phrase }}</option>
+        </select>
+        <input
+          ref="textInputRef"
+          v-model="textInputValue"
+          class="image-viewer__text-input"
+          @blur="finalizeText"
+          @keyup.enter="finalizeText"
+          @keyup.escape="cancelText"
+        />
+      </div>
+    </div>
+
+    <!-- 4.1: 页码指示器 -->
+    <div v-if="totalCount > 0 && !loading" class="image-viewer__page-indicator">
+      <template v-if="!showPageInput">
+        <span class="page-label" @click="openPageInput">{{ currentIndex + 1 }} / {{ totalCount }}</span>
+      </template>
+      <template v-else>
+        <input
+          ref="pageInputRef"
+          v-model.number="pageInputValue"
+          class="page-input"
+          type="number"
+          :min="1"
+          :max="totalCount"
+          @keyup.enter="gotoPage"
+          @keyup.escape="closePageInput"
+          @blur="closePageInput"
+        />
+      </template>
     </div>
 
     <!-- Error state -->
@@ -89,6 +147,8 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useImageViewer } from '@/composables/useImageViewer'
 import { useAnnotationStore } from '@/stores/annotation'
+import { useProgressiveImage } from '@/composables/useProgressiveImage'
+import { annotationApi } from '@/api/annotations'
 import type { Annotation, AnnotationCreateParams, AnnotationColor, AnnotationToolType, PenWidth, ArrowWidth, FontSize } from '@/types/models'
 
 const props = defineProps<{
@@ -98,6 +158,9 @@ const props = defineProps<{
   activeColor: AnnotationColor
   activeWidth: PenWidth | ArrowWidth
   activeFontSize: FontSize
+  currentIndex?: number
+  totalCount?: number
+  cardDraftText?: string
 }>()
 
 const emit = defineEmits<{
@@ -108,6 +171,10 @@ const emit = defineEmits<{
   (e: 'next'): void
   (e: 'fullscreen-toggle', active: boolean): void
   (e: 'tool-toggle'): void
+  (e: 'goto-page', page: number): void
+  (e: 'draft-restore', text: string): void
+  (e: 'draft-ignore'): void
+  (e: 'focus-next-card'): void
 }>()
 
 const store = useAnnotationStore()
@@ -147,6 +214,40 @@ const showTextInput = ref(false)
 const textInputValue = ref('')
 const textInputPos = ref({ x: 0, y: 0 })
 
+// 4.1: 页码指示器
+const showPageInput = ref(false)
+const pageInputValue = ref(1)
+const pageInputRef = ref<HTMLInputElement | null>(null)
+
+// 4.3: 旋转状态
+const rotationAngle = ref(0)
+const rotationAngles = ref<Record<string, number>>({})
+const rotationToastShown = ref(false)
+
+// 4.4: 预设短语
+const presetPhrases = ref<string[]>([
+  '曝光不足', '色温偏冷', '高光溢出', '饱和度不足',
+  '白平衡偏移', '暗部细节丢失', '噪点过多', '锐度不足'
+])
+
+// 4.5: 框选实时尺寸
+const showSizeOverlay = ref(false)
+const sizeOverlayText = ref('')
+const sizeOverlayPos = ref({ x: 0, y: 0 })
+
+// 4.7: 草稿恢复横幅
+const showDraftBanner = ref(false)
+
+// 4.15: 渐进式图片加载
+const blurSrc = ref('')
+const progressiveImage = computed(() => {
+  if (props.imageUrl) {
+    const thumb = props.imageUrl.replace(/\/original\//, '/thumb/').replace(/\.(jpg|jpeg|png|webp)$/i, '_thumb.$1')
+    return { thumbnailUrl: thumb, originalUrl: props.imageUrl }
+  }
+  return null
+})
+
 let renderRaf = 0
 let needsRender = true
 
@@ -164,7 +265,7 @@ const positionPercent = computed(() => {
 const imageStyle = computed(() => ({
   width: displayWidth.value ? `${displayWidth.value}px` : 'auto',
   height: displayHeight.value ? `${displayHeight.value}px` : 'auto',
-  transform: `translate(${viewer.offsetX.value}px, ${viewer.offsetY.value}px) scale(${viewer.scale.value})`,
+  transform: `translate(${viewer.offsetX.value}px, ${viewer.offsetY.value}px) scale(${viewer.scale.value}) rotate(${rotationAngle.value}deg)`,
   transformOrigin: '0 0',
   opacity: imageLoaded.value ? 1 : 0,
   transition: imageLoaded.value ? 'opacity 0.3s ease' : 'none'
@@ -173,7 +274,7 @@ const imageStyle = computed(() => ({
 const canvasStyle = computed(() => ({
   width: displayWidth.value ? `${displayWidth.value}px` : '0',
   height: displayHeight.value ? `${displayHeight.value}px` : '0',
-  transform: `translate(${viewer.offsetX.value}px, ${viewer.offsetY.value}px) scale(${viewer.scale.value})`,
+  transform: `translate(${viewer.offsetX.value}px, ${viewer.offsetY.value}px) scale(${viewer.scale.value}) rotate(${rotationAngle.value}deg)`,
   transformOrigin: '0 0'
 }))
 
@@ -184,6 +285,16 @@ const textInputStyle = computed(() => ({
   color: props.activeColor
 }))
 
+const textToolbarStyle = computed(() => ({
+  left: `${textInputPos.value.x * viewer.scale.value + viewer.offsetX.value}px`,
+  top: `${textInputPos.value.y * viewer.scale.value + viewer.offsetY.value - 40}px`,
+}))
+
+const sizeOverlayStyle = computed(() => ({
+  left: `${sizeOverlayPos.value.x}px`,
+  top: `${sizeOverlayPos.value.y - 24}px`,
+}))
+
 // ============ Lifecycle ============
 
 let resizeObserver: ResizeObserver | null = null
@@ -192,6 +303,15 @@ onMounted(() => {
   window.addEventListener('keydown', onGlobalKeydown)
   window.addEventListener('keyup', onGlobalKeyup)
   startRenderLoop()
+
+  // 4.4: 获取预设短语
+  fetchPresetPhrases()
+
+  // 4.7: 检查草稿
+  checkDraft()
+
+  // 4.15: 设置模糊占位
+  setupBlurPlaceholder()
 
   // ResizeObserver: re-fit image when container size changes
   if (containerRef.value) {
@@ -227,6 +347,12 @@ watch(() => props.imageUrl, () => {
   viewer.resetTransform()
   displayWidth.value = 0
   displayHeight.value = 0
+  // 4.3: 恢复旋转角度
+  rotationAngle.value = rotationAngles.value[props.imageUrl] || 0
+  // 4.7: 检查草稿
+  checkDraft()
+  // 4.15: 设置模糊占位
+  setupBlurPlaceholder()
 })
 
 // ============ Image Loading ============
@@ -662,6 +788,8 @@ function onStageMouseMove(event: MouseEvent): void {
     currentStroke.push([rel.x, rel.y])
     triggerRender()
   } else if (props.activeTool === 'arrow' || props.activeTool === 'rectangle' || props.activeTool === 'ellipse') {
+    // 4.5: 框选实时尺寸显示
+    updateSizeOverlay(event)
     triggerRender()
   }
 }
@@ -698,6 +826,7 @@ function onStageMouseUp(event: MouseEvent): void {
   }
 
   isDrawing.value = false
+  showSizeOverlay.value = false
   triggerRender()
 }
 
@@ -993,6 +1122,27 @@ function onGlobalKeydown(event: KeyboardEvent): void {
     triggerRender()
     return
   }
+  // 4.6: Ctrl/Cmd+D - 复制选中标注
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') {
+    event.preventDefault()
+    copySelectedAnnotation()
+    return
+  }
+  // 4.6: Ctrl/Cmd+G - 跳转页码
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'g') {
+    event.preventDefault()
+    openPageInput()
+    return
+  }
+  // 4.6: Tab - 聚焦下一个意见卡片
+  if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey) {
+    const el = document.activeElement
+    if (el === containerRef.value || containerRef.value?.contains(el)) {
+      event.preventDefault()
+      emit('focus-next-card')
+      return
+    }
+  }
 }
 
 function onGlobalKeyup(event: KeyboardEvent): void {
@@ -1002,6 +1152,135 @@ function onGlobalKeyup(event: KeyboardEvent): void {
     if (containerRef.value) {
       containerRef.value.style.cursor = ''
     }
+  }
+}
+
+// ============ 4.1: 页码跳转 ============
+
+function openPageInput() {
+  showPageInput.value = true
+  pageInputValue.value = (props.currentIndex || 0) + 1
+  nextTick(() => {
+    pageInputRef.value?.focus()
+    pageInputRef.value?.select()
+  })
+}
+
+function closePageInput() {
+  showPageInput.value = false
+}
+
+function gotoPage() {
+  const page = pageInputValue.value
+  if (page >= 1 && page <= (props.totalCount || 0)) {
+    emit('goto-page', page - 1)
+  }
+  closePageInput()
+}
+
+// ============ 4.3: 旋转 ============
+
+function rotateImage() {
+  rotationAngle.value = (rotationAngle.value + 90) % 360
+  rotationAngles.value[props.imageUrl] = rotationAngle.value
+  if (!rotationToastShown.value) {
+    rotationToastShown.value = true
+    const toastEl = document.querySelector('.toast-container')
+    if (toastEl) {
+      // Use simple toast via DOM
+      const div = document.createElement('div')
+      div.className = 'toast-item toast-info'
+      div.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:2000;padding:10px 24px;border-radius:8px;background:#1a73e8;color:#fff;font-size:14px;animation:fadeIn 0.3s ease;'
+      div.textContent = '旋转仅影响浏览视图，不会修改原图'
+      document.body.appendChild(div)
+      setTimeout(() => div.remove(), 3000)
+    }
+  }
+}
+
+// ============ 4.4: 预设短语 ============
+
+async function fetchPresetPhrases() {
+  try {
+    const res = await annotationApi.getPresetPhrases()
+    if (res.data.data && res.data.data.length > 0) {
+      presetPhrases.value = res.data.data
+    }
+  } catch {
+    // 使用默认短语
+  }
+}
+
+function onPresetPhraseSelected(event: Event) {
+  const select = event.target as HTMLSelectElement
+  if (select.value) {
+    textInputValue.value = select.value
+    select.value = ''
+    nextTick(() => {
+      textInputRef.value?.focus()
+    })
+  }
+}
+
+// ============ 4.5: 框选实时尺寸 ============
+
+function updateSizeOverlay(event: MouseEvent) {
+  showSizeOverlay.value = true
+  const pos = getCanvasPos(event.clientX, event.clientY)
+  const rel1 = toRelative(drawStartX.value, drawStartY.value)
+  const rel2 = toRelative(pos.x, pos.y)
+  const w = Math.abs(rel2.x - rel1.x) * displayWidth.value
+  const h = Math.abs(rel2.y - rel1.y) * displayHeight.value
+  sizeOverlayText.value = `${Math.round(w)}×${Math.round(h)} px`
+  sizeOverlayPos.value = { x: event.clientX + 12, y: event.clientY - 12 }
+}
+
+// ============ 4.6: 复制选中标注 ============
+
+function copySelectedAnnotation() {
+  if (!selectedAnnotationId.value) return
+  const ann = props.annotations.find(a => a.id === selectedAnnotationId.value)
+  if (!ann) return
+  const params: AnnotationCreateParams = {
+    toolType: ann.toolType,
+    coordinates: { ...ann.coordinates },
+    style: { ...ann.style },
+    strokeData: ann.strokeData ? [...ann.strokeData.map(p => [p[0], p[1]])] : undefined,
+    text: ann.text
+  }
+  const newAnn = store.addAnnotation(params)
+  emit('annotation-created', newAnn)
+}
+
+// ============ 4.7: 草稿恢复 ============
+
+function checkDraft() {
+  if (props.cardDraftText) {
+    showDraftBanner.value = true
+  } else {
+    showDraftBanner.value = false
+  }
+}
+
+function restoreDraft() {
+  if (props.cardDraftText) {
+    emit('draft-restore', props.cardDraftText)
+  }
+  showDraftBanner.value = false
+}
+
+function ignoreDraft() {
+  emit('draft-ignore')
+  showDraftBanner.value = false
+}
+
+// ============ 4.15: 模糊占位 ============
+
+function setupBlurPlaceholder() {
+  if (progressiveImage.value) {
+    blurSrc.value = progressiveImage.value.thumbnailUrl
+  } else {
+    blurSrc.value = ''
   }
 }
 </script>
@@ -1113,17 +1392,7 @@ function onGlobalKeyup(event: KeyboardEvent): void {
   overflow: hidden;
 }
 
-.image-viewer__image {
-  position: absolute;
-  top: 0;
-  left: 0;
-  display: block;
-  pointer-events: none;
-
-  &--loaded {
-    animation: fadeIn 0.4s ease;
-  }
-}
+// Image styles moved to the bottom with z-index
 
 .image-viewer__canvas {
   position: absolute;
@@ -1192,4 +1461,198 @@ function onGlobalKeyup(event: KeyboardEvent): void {
     background: rgba($color-primary-light, 0.3);
   }
 }
-</style>
+
+// ============ 4.1: 页码指示器 ============
+
+.image-viewer__page-indicator {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.page-label {
+  padding: 4px 14px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+
+  &:hover {
+    background: rgba(0, 0, 0, 0.7);
+  }
+}
+
+.page-input {
+  width: 70px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-size: 12px;
+  text-align: center;
+  outline: none;
+
+  &::-webkit-inner-spin-button,
+  &::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+}
+
+// ============ 4.3: 旋转按钮 ============
+
+.image-viewer__rotate-btn {
+  position: absolute;
+  top: 12px;
+  right: 56px;
+  z-index: 20;
+  width: 36px;
+  height: 36px;
+  border-radius: $radius-sm;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+
+  .image-viewer:hover & {
+    opacity: 0.7;
+  }
+
+  &:hover {
+    opacity: 1 !important;
+    background: rgba(0, 0, 0, 0.7);
+  }
+}
+
+// ============ 4.4: 文字工具预设短语 ============
+
+.image-viewer__text-toolbar {
+  position: absolute;
+  z-index: 16;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.preset-phrase-select {
+  padding: 2px 6px;
+  border-radius: $radius-sm;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font-size: 11px;
+  outline: none;
+  height: 22px;
+  cursor: pointer;
+
+  &:focus {
+    border-color: $color-primary-light;
+  }
+
+  option {
+    background: #1e1e2e;
+    color: #fff;
+  }
+}
+
+// ============ 4.5: 框选实时尺寸 ============
+
+.image-viewer__size-overlay {
+  position: fixed;
+  z-index: 100;
+  padding: 2px 8px;
+  border-radius: $radius-sm;
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 11px;
+  font-family: $font-mono;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+// ============ 4.7: 草稿恢复横幅 ============
+
+.image-viewer__draft-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: rgba(#fbbc04, 0.9);
+  color: #5f4b00;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.btn-draft-restore {
+  padding: 3px 14px;
+  border-radius: $radius-sm;
+  background: #fff;
+  color: #5f4b00;
+  font-size: 12px;
+  font-weight: 600;
+  transition: background 0.2s;
+
+  &:hover {
+    background: #fff3cd;
+  }
+}
+
+.btn-draft-ignore {
+  padding: 3px 10px;
+  border-radius: $radius-sm;
+  background: transparent;
+  color: #5f4b00;
+  font-size: 12px;
+  text-decoration: underline;
+
+  &:hover {
+    opacity: 0.8;
+  }
+}
+
+// ============ 4.15: 模糊占位 ============
+
+.image-viewer__blur-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  filter: blur(10px);
+  transition: opacity 0.4s ease;
+  z-index: 1;
+
+  &--hidden {
+    opacity: 0;
+  }
+}
+
+.image-viewer__image {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: block;
+  pointer-events: none;
+  z-index: 2;
+
+  &--loaded {
+    animation: fadeIn 0.4s ease;
+  }
+}
