@@ -120,7 +120,7 @@ check "$code" "8.4 基于模板创建" "201"
 echo "━━━ F-18 保护型确稿 ━━━"
 # Ensure project is completed before test
 curl -s -X PUT "$BASE/projects/proj-002" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"status":"completed"}' > /dev/null
-RESP=$(curl -s -w "\n%{http_code}" -X POST "$BASE/projects/proj-002/modify-request" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"reason":"需要调整"}')
+RESP=$(curl -s -w "\n%{http_code}" -X POST "$BASE/projects/proj-002/modify-request" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"reason":"需要调整颜色亮度"}')
 code=$(echo "$RESP" | tail -1)
 check "$code" "9.1 客户申请修改" "200"
 
