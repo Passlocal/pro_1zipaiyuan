@@ -15,10 +15,16 @@ const QRCode = require('qrcode')
 const multer = require('multer')
 const sharp = require('sharp')
 const path = require('path')
+const crypto = require('crypto')
 const fs = require('fs')
 const http = require('http')
 const https = require('https')
 const { WebSocketServer } = require('ws')
+// V1.2.0: Email, ZIP export, PDF, APM
+const nodemailer = require('nodemailer')
+const archiver = require('archiver')
+const PDFDocument = require('pdfkit')
+const Sentry = require('@sentry/node')
 
 // =============================================================================
 // Configuration
@@ -50,6 +56,26 @@ const WECHAT_API_BASE = 'https://api.weixin.qq.com'
 
 // AI Service (可替换为真实 AI 服务)
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || ''
+const AI_RETRY_MAX = parseInt(process.env.AI_RETRY_MAX, 10) || 1
+const AI_RETRY_DELAY = parseInt(process.env.AI_RETRY_DELAY, 10) || 2000
+
+// V1.2.0: Email notification config
+const EMAIL_ENABLED = process.env.EMAIL_ENABLED === 'true' || IS_PROD
+const EMAIL_HOST = process.env.EMAIL_HOST || 'smtp.example.com'
+const EMAIL_PORT = parseInt(process.env.EMAIL_PORT, 10) || 587
+const EMAIL_USER = process.env.EMAIL_USER || ''
+const EMAIL_PASS = process.env.EMAIL_PASS || ''
+const EMAIL_FROM = process.env.EMAIL_FROM || 'noreply@epicshot.com'
+
+// V1.2.0: CDN signed URL secret
+const CDN_SECRET = process.env.CDN_SECRET || JWT_SECRET
+const CDN_URL_EXPIRY = 3600 // 1 hour
+
+// V1.2.0: Sentry APM
+if (process.env.SENTRY_DSN) {
+  Sentry.init({ dsn: process.env.SENTRY_DSN, environment: NODE_ENV, tracesSampleRate: 0.1 })
+  log('INFO', 'Server', 'Sentry initialized')
+}
 
 // =============================================================================
 // Ensure directories
@@ -93,6 +119,73 @@ function log(level, module, message, data) {
   var output = JSON.stringify(entry)
   if (level === 'ERROR') console.error(output)
   else console[level === 'WARN' ? 'warn' : 'log'](output)
+}
+
+// =============================================================================
+// V1.2.0: Email Transporter
+// =============================================================================
+var mailTransporter = null
+if (EMAIL_ENABLED && EMAIL_USER) {
+  mailTransporter = nodemailer.createTransport({
+    host: EMAIL_HOST,
+    port: EMAIL_PORT,
+    secure: EMAIL_PORT === 465,
+    auth: { user: EMAIL_USER, pass: EMAIL_PASS }
+  })
+}
+
+function sendEmail(to, subject, html) {
+  if (!mailTransporter) {
+    log('WARN', 'Email', 'Email not configured, skipping', { to: to, subject: subject })
+    return
+  }
+  mailTransporter.sendMail({ from: EMAIL_FROM, to: to, subject: subject, html: html }, function(err) {
+    if (err) log('ERROR', 'Email', 'Failed to send', { to: to, error: err.message })
+    else log('INFO', 'Email', 'Sent', { to: to, subject: subject })
+  })
+}
+
+// =============================================================================
+// V1.2.0: AI Retry Wrapper
+// =============================================================================
+function aiRetryWrapper(fn, label) {
+  return function() {
+    var args = arguments
+    var self = this
+    var attempt = 0
+    function tryCall() {
+      try {
+        fn.apply(self, args)
+      } catch (e) {
+        attempt++
+        if (attempt <= AI_RETRY_MAX) {
+          log('WARN', 'AI', 'Retry ' + label, { attempt: attempt })
+          setTimeout(tryCall, AI_RETRY_DELAY)
+        } else {
+          log('ERROR', 'AI', label + ' failed after retries', { error: e.message })
+        }
+      }
+    }
+    tryCall()
+  }
+}
+
+// =============================================================================
+// V1.2.0: CDN Signed URL
+// =============================================================================
+function generateSignedUrl(filePath) {
+  var expires = Math.floor(Date.now() / 1000) + CDN_URL_EXPIRY
+  var hmac = crypto.createHmac('sha256', CDN_SECRET)
+  hmac.update(filePath + '|' + expires)
+  var signature = hmac.digest('hex')
+  return '/cdn/' + encodeURIComponent(filePath) + '?expires=' + expires + '&sig=' + signature
+}
+
+function verifySignedUrl(filePath, expires, sig) {
+  if (parseInt(expires, 10) < Math.floor(Date.now() / 1000)) return false
+  var hmac = crypto.createHmac('sha256', CDN_SECRET)
+  hmac.update(filePath + '|' + expires)
+  return hmac.digest('hex') === sig
 }
 
 // =============================================================================
@@ -201,6 +294,57 @@ function migrate() {
   try { db.exec('ALTER TABLE portfolio ADD COLUMN name TEXT DEFAULT \'\'') } catch (e) { /* column exists */ }
   try { db.exec('ALTER TABLE portfolio ADD COLUMN description TEXT DEFAULT \'\'') } catch (e) { /* column exists */ }
   try { db.exec('ALTER TABLE portfolio ADD COLUMN is_published INTEGER DEFAULT 0') } catch (e) { /* column exists */ }
+
+  // V1.1 Migration: 任务指派 & 争议预警
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN assignee_id TEXT') } catch (e) { /* column exists */ }
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN dispute_count INTEGER DEFAULT 0') } catch (e) { /* column exists */ }
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN disputed INTEGER DEFAULT 0') } catch (e) { /* column exists */ }
+
+  // V1.2 Migration: 软删除 (回收站)
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN deleted_at TEXT') } catch (e) { /* column exists */ }
+  try { db.exec('ALTER TABLE annotations ADD COLUMN deleted_at TEXT') } catch (e) { /* column exists */ }
+  try { db.exec('ALTER TABLE images ADD COLUMN deleted_at TEXT') } catch (e) { /* column exists */ }
+
+  // V1.2.0 Migration: 草稿自动保存
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN draft_text TEXT') } catch (e) { /* column exists */ }
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN draft_updated_at TEXT') } catch (e) { /* column exists */ }
+
+  // V1.1 Migration: 项目预警设置
+  try { db.exec('ALTER TABLE projects ADD COLUMN warning_hours INTEGER DEFAULT 24') } catch (e) { /* column exists */ }
+  try { db.exec('ALTER TABLE projects ADD COLUMN metadata TEXT DEFAULT \'{}\'') } catch (e) { /* column exists */ }
+
+  // V1.1: 通知表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS notifications (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      type TEXT NOT NULL CHECK(type IN ('annotation','dispute','deadline','status_change','mention','assign','confirm_request')),
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      link TEXT DEFAULT '',
+      is_read INTEGER DEFAULT 0,
+      project_id TEXT,
+      comment_card_id TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at);
+    CREATE INDEX IF NOT EXISTS idx_notifications_workspace ON notifications(workspace_id);
+  `)
+
+  // V1.1: 项目模板表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS project_templates (
+      id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      assignee_map TEXT DEFAULT '{}',
+      delivery_rules TEXT DEFAULT '{}',
+      created_at TEXT DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_templates_workspace ON project_templates(workspace_id);
+  `)
 }
 
 function seedIfEmpty() {
@@ -217,21 +361,31 @@ function seedIfEmpty() {
   db.prepare('INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-002', '李修图', 'li@epicshot.com', adminHash, null, wsId, 'editor', '', 'active', '2026-02-10T10:00:00Z')
   db.prepare('INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-003', '王后期', 'wang@epicshot.com', adminHash, null, wsId, 'editor', '', 'active', '2026-03-05T09:00:00Z')
 
-  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)').run('proj-001', wsId, '小米15系列官网主图', '小米科技', null, 'in_progress', 'share-token-001', null, 8, '2026-06-01T10:00:00Z', '2026-06-14T10:00:00Z')
-  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)').run('proj-002', wsId, '花西子口红新品', '花西子', null, 'final_review', 'share-token-002', null, 3, '2026-05-28T14:00:00Z', '2026-06-13T16:00:00Z')
-  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?)').run('proj-003', wsId, '2026春季跑鞋系列', '安踏体育', null, 'completed', 'share-token-003', null, 0, '2026-05-15T09:00:00Z', '2026-06-10T09:00:00Z')
+  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-001', wsId, '小米15系列官网主图', '小米科技', null, 'in_progress', 'share-token-001', null, 8, '2026-06-01T10:00:00Z', '2026-06-14T10:00:00Z', 24, '{}')
+  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-002', wsId, '花西子口红新品', '花西子', null, 'final_review', 'share-token-002', null, 3, '2026-05-28T14:00:00Z', '2026-06-13T16:00:00Z', 24, '{}')
+  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-003', wsId, '2026春季跑鞋系列', '安踏体育', null, 'completed', 'share-token-003', null, 0, '2026-05-15T09:00:00Z', '2026-06-10T09:00:00Z', 24, '{}')
 
   db.prepare('INSERT INTO product_units VALUES (?,?,?,?)').run('unit-001', 'proj-001', '主图', 1)
   db.prepare('INSERT INTO product_units VALUES (?,?,?,?)').run('unit-002', 'proj-001', '细节图', 2)
 
-  db.prepare('INSERT INTO images VALUES (?,?,?,?,?,?,?,?)').run('img-001', 'unit-001', '/uploads/placeholder.svg', '["/uploads/placeholder.svg","/uploads/placeholder.svg","/uploads/placeholder.svg"]', 'image', '{"width":800,"height":600}', 'user-001', '2026-06-01T10:00:00Z')
-  db.prepare('INSERT INTO images VALUES (?,?,?,?,?,?,?,?)').run('img-002', 'unit-001', '/uploads/placeholder.svg', '["/uploads/placeholder.svg","/uploads/placeholder.svg","/uploads/placeholder.svg"]', 'image', '{"width":800,"height":1200}', 'user-001', '2026-06-01T10:30:00Z')
+  db.prepare('INSERT INTO images VALUES (?,?,?,?,?,?,?,?,?)').run('img-001', 'unit-001', '/uploads/placeholder.svg', '["/uploads/placeholder.svg","/uploads/placeholder.svg","/uploads/placeholder.svg"]', 'image', '{"width":800,"height":600}', 'user-001', '2026-06-01T10:00:00Z', null)
+  db.prepare('INSERT INTO images VALUES (?,?,?,?,?,?,?,?,?)').run('img-002', 'unit-001', '/uploads/placeholder.svg', '["/uploads/placeholder.svg","/uploads/placeholder.svg","/uploads/placeholder.svg"]', 'image', '{"width":800,"height":1200}', 'user-001', '2026-06-01T10:30:00Z', null)
 
-  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?)').run('ann-001', 'img-001', 'user-001', 'rectangle', '{"x":0.15,"y":0.2,"w":0.3,"h":0.25}', '{"color":"#FF0000","width":3}', '[]', '', '2026-06-05T10:00:00Z')
-  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?)').run('ann-002', 'img-001', 'user-001', 'arrow', '{"x":0.5,"y":0.6,"w":0.15,"h":-0.2}', '{"color":"#0066FF","width":3}', '[]', '', '2026-06-05T10:05:00Z')
+  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)').run('ann-001', 'img-001', 'user-001', 'rectangle', '{"x":0.15,"y":0.2,"w":0.3,"h":0.25}', '{"color":"#FF0000","width":3}', '[]', '', '2026-06-05T10:00:00Z', null)
+  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)').run('ann-002', 'img-001', 'user-001', 'arrow', '{"x":0.5,"y":0.6,"w":0.15,"h":-0.2}', '{"color":"#0066FF","width":3}', '[]', '', '2026-06-05T10:05:00Z', null)
 
-  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?)').run('card-001', 'ann-001', 'img-001', '这个区域需要重新构图', 'resolved', 1, 'user-002', '2026-06-06T14:00:00Z', '2026-06-05T10:00:00Z')
-  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?)').run('card-002', 'ann-002', 'img-001', '箭头指向的元素请替换', 'unresolved', 2, null, null, '2026-06-05T10:05:00Z')
+  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('card-001', 'ann-001', 'img-001', '这个区域需要重新构图', 'resolved', 1, 'user-002', '2026-06-06T14:00:00Z', '2026-06-05T10:00:00Z', null, 0, 0, null)
+  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('card-002', 'ann-002', 'img-001', '箭头指向的元素请替换', 'unresolved', 2, null, null, '2026-06-05T10:05:00Z', null, 0, 0, null)
+
+  // F-15-1: 预置口语化标注意见
+  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)').run('ann-003', 'img-002', 'user-001', 'freehand', '{"points":[[0.2,0.25],[0.35,0.3],[0.5,0.25],[0.65,0.3]]}', '{"color":"#FF0000","width":5}', '[]', '', '2026-06-07T09:00:00Z', null)
+  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)').run('ann-004', 'img-002', 'user-001', 'text', '{"x":0.1,"y":0.15,"w":0.4,"h":0.06}', '{"color":"#FF0000","fontSize":18}', '[]', '', '2026-06-07T09:05:00Z', null)
+  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('card-003', 'ann-003', 'img-002', '袖口这边脏了，要处理干净', 'unresolved', 3, null, null, '2026-06-07T09:00:00Z', null, 0, 0, null)
+  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('card-004', 'ann-004', 'img-002', '整体要那种高级灰的感觉', 'unresolved', 4, null, null, '2026-06-07T09:05:00Z', null, 0, 0, null)
+
+  // F-23: 预置项目模板
+  db.prepare('INSERT INTO project_templates VALUES (?,?,?,?,?,?,?)').run('tpl-001', wsId, '电商白底图标准流程', '适用于白底产品拍摄的标准修图流程，包含修图和质检环节', JSON.stringify({'retouch':'user-002','qa':'user-001'}), JSON.stringify({'naming':'产品名_最终稿','format':'jpg','minWidth':2000,'minHeight':2000}), '2026-06-01T00:00:00Z')
+  db.prepare('INSERT INTO project_templates VALUES (?,?,?,?,?,?,?)').run('tpl-002', wsId, '时尚模特图流程', '适用于服装、配饰模特拍摄修图流程', JSON.stringify({'retouch':'user-003','qa':'user-001'}), JSON.stringify({'naming':'品牌_模特_日期','format':'jpg','colorSpace':'sRGB'}), '2026-06-01T00:00:00Z')
 
   db.prepare('INSERT INTO timeline_events VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-001', 'proj-001', 'annotation', '客户 张经理', '', '提交了 2 条批注意见', null, null, null, '2026-06-05T10:10:00Z')
   db.prepare('INSERT INTO timeline_events VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-002', 'proj-001', 'status_change', '张总监', '', '项目状态变更：草稿 -> 待客户确认', null, null, null, '2026-06-05T10:30:00Z')
@@ -274,6 +428,16 @@ app.use(helmet({
     }
   } : false
 }))
+
+// V1.2.0: HSTS (HTTP Strict Transport Security)
+if (IS_PROD) {
+  app.use(helmet.hsts({ maxAge: 31536000, includeSubDomains: true, preload: true }))
+}
+
+// V1.2.0: Sentry request handler (must be before routes)
+if (process.env.SENTRY_DSN) {
+  Sentry.setupExpressErrorHandler(app)
+}
 
 // CORS — permissive in dev, origin-whitelist in production
 app.use(cors({
@@ -416,6 +580,10 @@ function authMiddleware(req, res, next) {
     req.userId = payload.userId
     req.userRole = payload.role
     req.workspaceId = payload.workspaceId
+    // V1.2: viewer角色只能读取
+    if (req.userRole === 'viewer' && req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS') {
+      return res.status(403).json({ code: 'FORBIDDEN', message: '外部协作者无此操作权限' })
+    }
     next()
   } catch (e) {
     if (e.name === 'TokenExpiredError') {
@@ -427,6 +595,12 @@ function authMiddleware(req, res, next) {
 
 function ownerOnly(req, res, next) {
   if (req.userRole !== 'owner') return res.status(403).json({ code: 'FORBIDDEN', message: '仅管理员可操作' })
+  next()
+}
+
+// V1.2: viewer角色 — 只能读取，不能写入
+function notViewer(req, res, next) {
+  if (req.userRole === 'viewer') return res.status(403).json({ code: 'FORBIDDEN', message: '外部协作者无此操作权限' })
   next()
 }
 
@@ -476,7 +650,7 @@ app.get('/health', function(req, res) {
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
     db: 'connected',
-    version: '1.0.0'
+    version: '1.2.0'
   })
 })
 
@@ -484,8 +658,9 @@ app.get('/health', function(req, res) {
 // Auth Routes
 // =============================================================================
 app.post('/v1/auth/login', authLimiter, function(req, res) {
-  var email = (req.body.email || '').trim().toLowerCase()
-  var password = req.body.password || ''
+  if (!req.body || typeof req.body !== 'object') return res.status(400).json({ code: 'INVALID_JSON', message: '请求体JSON格式无效' })
+  var email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : ''
+  var password = typeof req.body.password === 'string' ? req.body.password : ''
 
   if (!validateEmail(email)) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '邮箱格式不正确' })
   if (!password) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '请输入密码' })
@@ -892,17 +1067,31 @@ app.post('/v1/projects/:id/share', authMiddleware, function(req, res) {
   var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
   if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
 
-  var token = 'share_' + uuidv4().replace(/-/g, '').slice(0, 16)
+  // V1.2: HMAC签名分享Token
+  var rawToken = crypto.randomBytes(16).toString('hex')
+  var hmac = crypto.createHmac('sha256', JWT_SECRET).update(rawToken).digest('hex').slice(0, 16)
+  var signedToken = rawToken + '.' + hmac
   var expiry = null
   if (req.body.expiry === '7days') expiry = new Date(Date.now() + 7 * 86400000).toISOString()
   else if (req.body.expiry === '30days') expiry = new Date(Date.now() + 30 * 86400000).toISOString()
 
-  db.prepare('UPDATE projects SET share_token = ?, share_expiry = ? WHERE id = ?').run(token, expiry, req.params.id)
-  res.json({ data: { token: token, url: (process.env.FRONTEND_URL || 'http://localhost:5173') + '/client/project/' + token } })
+  db.prepare('UPDATE projects SET share_token = ?, share_expiry = ? WHERE id = ?').run(signedToken, expiry, req.params.id)
+  res.json({ data: { token: signedToken, url: (process.env.FRONTEND_URL || 'http://localhost:5173') + '/client/project/' + signedToken } })
 })
 
 app.get('/v1/share/:token', function(req, res) {
-  var proj = db.prepare('SELECT * FROM projects WHERE share_token = ?').get(req.params.token)
+  // V1.2: HMAC签名验证
+  var token = req.params.token
+  var parts = token.split('.')
+  if (parts.length !== 2) {
+    return res.status(403).json({ code: 'INVALID_TOKEN', message: '分享链接无效（签名格式错误）' })
+  }
+  var rawToken = parts[0]
+  var expectedHmac = crypto.createHmac('sha256', JWT_SECRET).update(rawToken).digest('hex').slice(0, 16)
+  if (parts[1] !== expectedHmac) {
+    return res.status(403).json({ code: 'INVALID_TOKEN', message: '分享链接无效（签名验证失败）' })
+  }
+  var proj = db.prepare('SELECT * FROM projects WHERE share_token = ?').get(token)
   if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '分享链接不存在或已失效' })
   // Check expiry
   if (proj.share_expiry && new Date(proj.share_expiry) < new Date()) {
@@ -1020,7 +1209,7 @@ app.get('/v1/images/:id/download', authMiddleware, function(req, res) {
 // Annotation Routes
 // =============================================================================
 app.get('/v1/images/:imageId/annotations', authMiddleware, function(req, res) {
-  var anns = db.prepare('SELECT * FROM annotations WHERE image_id = ? ORDER BY created_at').all(req.params.imageId)
+  var anns = db.prepare('SELECT * FROM annotations WHERE image_id = ? AND deleted_at IS NULL ORDER BY created_at').all(req.params.imageId)
   res.json({ data: anns.map(formatAnnotation) })
 })
 
@@ -1059,16 +1248,113 @@ app.put('/v1/annotations/:id', authMiddleware, function(req, res) {
 })
 
 app.delete('/v1/annotations/:id', authMiddleware, function(req, res) {
-  db.prepare('DELETE FROM comment_cards WHERE annotation_id = ?').run(req.params.id)
-  db.prepare('DELETE FROM annotations WHERE id = ?').run(req.params.id)
-  res.json({ data: null })
+  // V1.2: 软删除 — 设置deleted_at时间戳
+  var now = new Date().toISOString()
+  db.prepare('UPDATE comment_cards SET deleted_at = ? WHERE annotation_id = ? AND deleted_at IS NULL').run(now, req.params.id)
+  db.prepare('UPDATE annotations SET deleted_at = ? WHERE id = ?').run(now, req.params.id)
+  res.json({ data: { deletedAt: now } })
+})
+
+// V1.2: 回收站 — 获取已删除项目列表
+app.get('/v1/recycle-bin', authMiddleware, function(req, res) {
+  var wsId = req.workspaceId
+  var type = req.query.type || 'all'
+
+  var deletedCards = []
+  var deletedAnnotations = []
+
+  if (type === 'all' || type === 'cards' || type === 'comment_cards') {
+    deletedCards = db.prepare(`
+      SELECT cc.*, a.tool_type, a.coordinates, a.style, i.original_url, i.thumbnail_urls
+      FROM comment_cards cc
+      JOIN annotations a ON a.id = cc.annotation_id
+      JOIN images i ON i.id = a.image_id
+      JOIN product_units pu ON pu.id = i.product_unit_id
+      JOIN projects p ON p.id = pu.project_id AND p.workspace_id = ?
+      WHERE cc.deleted_at IS NOT NULL
+      ORDER BY cc.deleted_at DESC
+    `).all(wsId).map(function(r) {
+      return {
+        id: r.id,
+        type: 'comment_card',
+        annotationId: r.annotation_id,
+        imageUrl: (JSON.parse(r.thumbnail_urls || '[""]')[0]) || r.original_url,
+        text: r.text_content,
+        deletedAt: r.deleted_at,
+        restorableUntil: new Date(new Date(r.deleted_at).getTime() + 30 * 86400000).toISOString()
+      }
+    })
+  }
+
+  if (type === 'all' || type === 'annotations') {
+    deletedAnnotations = db.prepare(`
+      SELECT a.*, i.original_url, i.thumbnail_urls
+      FROM annotations a
+      JOIN images i ON i.id = a.image_id
+      JOIN product_units pu ON pu.id = i.product_unit_id
+      JOIN projects p ON p.id = pu.project_id AND p.workspace_id = ?
+      WHERE a.deleted_at IS NOT NULL
+        AND NOT EXISTS (SELECT 1 FROM comment_cards cc WHERE cc.annotation_id = a.id AND cc.deleted_at IS NULL)
+      ORDER BY a.deleted_at DESC
+    `).all(wsId).map(function(r) {
+      return {
+        id: r.id,
+        type: 'annotation',
+        toolType: r.tool_type,
+        imageUrl: (JSON.parse(r.thumbnail_urls || '[""]')[0]) || r.original_url,
+        deletedAt: r.deleted_at,
+        restorableUntil: new Date(new Date(r.deleted_at).getTime() + 30 * 86400000).toISOString()
+      }
+    })
+  }
+
+  res.json({ data: deletedCards.concat(deletedAnnotations) })
+})
+
+// V1.2: 回收站 — 恢复已删除项目
+app.post('/v1/recycle-bin/:type/:id/restore', authMiddleware, function(req, res) {
+  var type = req.params.type
+  var id = req.params.id
+  var now = new Date().toISOString()
+
+  if (type === 'comment_cards' || type === 'cards') {
+    var card = db.prepare(`
+      SELECT cc.* FROM comment_cards cc
+      JOIN annotations a ON a.id = cc.annotation_id
+      JOIN images i ON i.id = a.image_id
+      JOIN product_units pu ON pu.id = i.product_unit_id
+      JOIN projects p ON p.id = pu.project_id AND p.workspace_id = ?
+      WHERE cc.id = ? AND cc.deleted_at IS NOT NULL
+    `).get(req.workspaceId, id)
+    if (!card) return res.status(404).json({ code: 'NOT_FOUND', message: '记录不存在或不在回收站' })
+
+    db.prepare('UPDATE comment_cards SET deleted_at = NULL WHERE id = ?').run(id)
+    db.prepare('UPDATE annotations SET deleted_at = NULL WHERE id = ?').run(card.annotation_id)
+    return res.json({ data: { restored: true } })
+  }
+
+  if (type === 'annotations') {
+    var ann = db.prepare(`
+      SELECT a.* FROM annotations a
+      JOIN images i ON i.id = a.image_id
+      JOIN product_units pu ON pu.id = i.product_unit_id
+      JOIN projects p ON p.id = pu.project_id AND p.workspace_id = ?
+      WHERE a.id = ? AND a.deleted_at IS NOT NULL
+    `).get(req.workspaceId, id)
+    if (!ann) return res.status(404).json({ code: 'NOT_FOUND', message: '记录不存在或不在回收站' })
+
+    db.prepare('UPDATE annotations SET deleted_at = NULL WHERE id = ?').run(id)
+    return res.json({ data: { restored: true } })
+  }
+
+  return res.status(400).json({ code: 'INVALID_TYPE', message: '无效的类型: ' + type })
 })
 
 // =============================================================================
 // Comment Card Routes
 // =============================================================================
 app.get('/v1/images/:imageId/comment-cards', authMiddleware, function(req, res) {
-  var cards = db.prepare('SELECT * FROM comment_cards WHERE image_id = ? ORDER BY sort_order').all(req.params.imageId)
+  var cards = db.prepare('SELECT * FROM comment_cards WHERE image_id = ? AND deleted_at IS NULL ORDER BY sort_order').all(req.params.imageId)
   res.json({ data: cards.map(formatCommentCard) })
 })
 
@@ -1106,8 +1392,26 @@ app.put('/v1/comment-cards/:id/status', authMiddleware, function(req, res) {
     db.prepare("UPDATE comment_cards SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?")
       .run(req.userId, req.params.id)
   } else {
-    db.prepare("UPDATE comment_cards SET status = 'unresolved', resolved_by = NULL, resolved_at = NULL WHERE id = ?")
-      .run(req.params.id)
+    // V1.1: 重新打开已解决的卡片 → 争议计数+1
+    var existing = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
+    if (existing && existing.status === 'resolved') {
+      var newCount = (existing.dispute_count || 0) + 1
+      var disputed = newCount >= 2 ? 1 : 0
+      db.prepare("UPDATE comment_cards SET status = 'unresolved', resolved_by = NULL, resolved_at = NULL, dispute_count = ?, disputed = ? WHERE id = ?")
+        .run(newCount, disputed, req.params.id)
+
+      if (disputed) {
+        var owners = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND role = ?').all(req.workspaceId, 'owner')
+        owners.forEach(function(o) {
+          createNotification(req.workspaceId, o.id, 'dispute',
+            '争议预警', '【' + getCardContext(req.params.id) + '】意见被反复驳回，已标记为争议',
+            '/project/' + getProjectIdByCard(req.params.id), null, req.params.id)
+        })
+      }
+    } else {
+      db.prepare("UPDATE comment_cards SET status = 'unresolved', resolved_by = NULL, resolved_at = NULL WHERE id = ?")
+        .run(req.params.id)
+    }
   }
 
   var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
@@ -1209,21 +1513,46 @@ app.post('/v1/ai/style-samples', authMiddleware, function(req, res) {
     log('INFO', 'AI', 'Style sample task created', { taskId: taskId, style: style })
   }
 
-  res.json({ data: { taskId: taskId } })
+  res.json({ data: { taskId: taskId, retryable: true } })
+
+  // V1.2.0: Async AI call with retry
+  if (AI_SERVICE_URL) {
+    var attempt = 0
+    function callAI() {
+      try {
+        log('INFO', 'AI', 'Style sample task created', { taskId: taskId, style: style, attempt: attempt })
+        // In production, call external AI service here
+      } catch (e) {
+        attempt++
+        if (attempt <= AI_RETRY_MAX) {
+          log('WARN', 'AI', 'Retry style generation', { attempt: attempt, taskId: taskId })
+          setTimeout(callAI, AI_RETRY_DELAY)
+        } else {
+          log('ERROR', 'AI', 'Style generation failed', { taskId: taskId, error: e.message })
+          db.prepare('UPDATE ai_samples SET output_urls = ? WHERE id = ?').run(JSON.stringify({ error: 'AI_SERVICE_FAILED', retryable: true }), taskId)
+        }
+      }
+    }
+    callAI()
+  }
+
+  res.json({ data: { taskId: taskId, retryable: true } })
 })
 
 app.get('/v1/ai/style-samples/:taskId', authMiddleware, function(req, res) {
   var sample = db.prepare('SELECT * FROM ai_samples WHERE id = ?').get(req.params.taskId)
   if (!sample) return res.status(404).json({ code: 'NOT_FOUND', message: '任务不存在' })
 
-  // Return stored results if completed, otherwise return pending
   var outputUrls = JSON.parse(sample.output_urls || '[]')
+  var hasError = outputUrls && outputUrls.error
   res.json({
     data: {
       taskId: sample.id,
-      status: outputUrls.length > 0 ? 'completed' : 'pending',
-      progress: outputUrls.length > 0 ? 100 : 50,
-      result: outputUrls.length > 0 ? { urls: outputUrls } : null
+      status: hasError ? 'failed' : (outputUrls.length > 0 ? 'completed' : 'pending'),
+      progress: hasError ? 0 : (outputUrls.length > 0 ? 100 : 50),
+      result: hasError ? null : (outputUrls.length > 0 ? { urls: outputUrls } : null),
+      error: hasError ? outputUrls : null,
+      retryable: hasError ? (outputUrls.retryable || false) : false
     }
   })
 })
@@ -1327,6 +1656,128 @@ app.get('/v1/ai/color-check/:taskId', authMiddleware, function(req, res) {
       totalImages: totalImages,
       abnormalCount: abnormalCount,
       items: items,
+      createdAt: new Date().toISOString()
+    }
+  })
+})
+
+// =============================================================================
+// F-26: AI 全图一致性巡检（光影探照灯）
+// =============================================================================
+var consistencyTasks = new Map() // taskId -> projectId
+
+app.post('/v1/ai/consistency-check', authMiddleware, function(req, res) {
+  var projectId = req.body.projectId
+  if (!projectId) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少 projectId' })
+
+  var proj = db.prepare('SELECT id FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
+  var taskId = uuidv4()
+  consistencyTasks.set(taskId, projectId)
+  log('INFO', 'AI', 'Consistency check started', { projectId: projectId, taskId: taskId })
+  res.json({ data: { taskId: taskId } })
+})
+
+app.get('/v1/ai/consistency-check/:taskId', authMiddleware, function(req, res) {
+  var projectId = consistencyTasks.get(req.params.taskId)
+  if (!projectId) {
+    return res.status(404).json({ code: 'NOT_FOUND', message: '任务不存在' })
+  }
+
+  // 获取项目下所有图片，按产品单元分组
+  var units = db.prepare(`
+    SELECT pu.id, pu.name FROM product_units pu
+    WHERE pu.project_id = ?
+    ORDER BY pu.sort_order
+  `).all(projectId)
+
+  var allImages = []
+  units.forEach(function(u) {
+    var imgs = db.prepare('SELECT id, thumbnail_urls, metadata FROM images WHERE product_unit_id = ?').all(u.id)
+    imgs.forEach(function(img) {
+      allImages.push({
+        id: img.id,
+        unitId: u.id,
+        unitName: u.name,
+        thumbnailUrl: (JSON.parse(img.thumbnail_urls || '[]')[0]) || '/uploads/placeholder.svg',
+        metadata: JSON.parse(img.metadata || '{}')
+      })
+    })
+  })
+
+  // 模拟光影一致性分析
+  var sceneGroups = units.map(function(u) {
+    return {
+      sceneId: u.id,
+      sceneName: u.name,
+      imageCount: allImages.filter(function(i) { return i.unitId === u.id }).length,
+      dominantLightDirection: ['左上方', '右上方', '正上方', '左前方', '右前方'][Math.floor(Math.random() * 5)],
+      consistency: Math.random() > 0.4 ? 'consistent' : 'inconsistent'
+    }
+  })
+
+  // 生成异常报告
+  var anomalies = []
+  var anomalyTypes = [
+    { type: 'light_direction', desc: '主光源方向不一致，疑似灯位偏移', severity: 'high' },
+    { type: 'highlight_position', desc: '面部高光位置与组图其他图片不一致', severity: 'high' },
+    { type: 'shadow_angle', desc: '阴影角度偏差超过阈值，光源高度可能变化', severity: 'medium' },
+    { type: 'color_temperature', desc: '同组图片色温不统一，白平衡设置可能变更', severity: 'medium' },
+    { type: 'exposure', desc: '曝光量差异明显，闪光灯功率可能不一致', severity: 'low' },
+    { type: 'reflection', desc: '反光面亮度差异过大，柔光设备位置可能偏移', severity: 'low' }
+  ]
+
+  if (allImages.length >= 3) {
+    // 模拟2-3条异常
+    var anomalyCount = Math.min(anomalyTypes.length, Math.floor(allImages.length / 2))
+    for (var a = 0; a < anomalyCount; a++) {
+      var at = anomalyTypes[a]
+      var affected = []
+      var count = Math.min(3, Math.max(2, allImages.length - 2))
+      for (var ai = 0; ai < count; ai++) {
+        var idx = (a * 2 + ai) % allImages.length
+        affected.push(allImages[idx].id)
+      }
+      var normal = allImages.filter(function(im) { return affected.indexOf(im.id) === -1 }).slice(0, 2).map(function(im) { return im.id })
+      anomalies.push({
+        id: 'anomaly-' + (a + 1),
+        type: at.type,
+        description: at.desc,
+        severity: at.severity,
+        affectedImageIds: affected,
+        normalImageIds: normal,
+        suggestion: at.type === 'light_direction'
+          ? '建议检查主灯位置，确认灯架与模特相对位置是否一致'
+          : at.type === 'highlight_position'
+          ? '建议重新校准主灯高度和角度，确保所有图片面部高光落在同一区域'
+          : at.type === 'shadow_angle'
+          ? '建议固定光源高度，使用测光表确认每次拍摄的入射光角度'
+          : at.type === 'color_temperature'
+          ? '建议锁定相机白平衡设置(建议5500K)，避免使用自动白平衡'
+          : at.type === 'exposure'
+          ? '建议使用测光表统一曝光参数，锁定闪光灯输出功率'
+          : '建议检查柔光设备位置，确保补光均匀'
+      })
+    }
+  }
+
+  var consistentCount = sceneGroups.filter(function(s) { return s.consistency === 'consistent' }).length
+  var inconsistentCount = sceneGroups.filter(function(s) { return s.consistency === 'inconsistent' }).length
+
+  res.json({
+    data: {
+      id: req.params.taskId,
+      projectId: projectId,
+      totalImages: allImages.length,
+      totalSceneGroups: sceneGroups.length,
+      consistentSceneGroups: consistentCount,
+      inconsistentSceneGroups: inconsistentCount,
+      sceneGroups: sceneGroups,
+      anomalies: anomalies,
+      overallScore: sceneGroups.length > 0
+        ? Math.round((consistentCount / sceneGroups.length) * 100)
+        : 100,
       createdAt: new Date().toISOString()
     }
   })
@@ -1462,6 +1913,632 @@ app.get('/v1/client/me/projects', authMiddleware, function(req, res) {
   res.json({ data: projects.map(formatProject), total: projects.length, page: 1, pageSize: 20 })
 })
 
+// F-18: 客户申请修改（确稿后）
+app.post('/v1/projects/:id/modify-request', authMiddleware, function(req, res) {
+  var project = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!project) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+  if (project.status !== 'completed') return res.status(400).json({ code: 'INVALID_STATUS', message: '项目尚未确稿' })
+
+  var reason = req.body.reason || ''
+  // 通知所有owner
+  var owners = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND role = ?').all(req.workspaceId, 'owner')
+  owners.forEach(function(o) {
+    createNotification(req.workspaceId, o.id, 'confirm_request',
+      '客户申请修改', '客户对【' + project.name + '】提出修改申请：' + reason,
+      '/project/' + project.id, project.id, null)
+  })
+
+  res.json({ data: { ok: true } })
+})
+
+// F-18: 老板驳回确稿（重新开放编辑）
+app.put('/v1/projects/:id/reject-confirm', authMiddleware, function(req, res) {
+  var project = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!project) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+  if (project.status !== 'completed') return res.status(400).json({ code: 'INVALID_STATUS', message: '项目尚未确稿' })
+
+  // 只有owner可以驳回
+  var user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.userId)
+  if (user.role !== 'owner') return res.status(403).json({ code: 'FORBIDDEN', message: '仅空间拥有者可以驳回确稿' })
+
+  db.prepare("UPDATE projects SET status = 'in_progress', updated_at = datetime('now') WHERE id = ?").run(project.id)
+
+  // 通知所有相关成员
+  var members = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND status = ?').all(req.workspaceId, 'active')
+  members.forEach(function(m) {
+    createNotification(req.workspaceId, m.id, 'status_change',
+      '确稿已驳回', '【' + project.name + '】确稿已被驳回，项目重新开放编辑',
+      '/project/' + project.id, project.id, null)
+  })
+
+  res.json({ data: { ok: true } })
+})
+
+// =============================================================================
+// V1.1 Routes: 战情室、任务指派、通知
+// =============================================================================
+
+// F-24: 老板战情室 — 全局健康度 + 成员负载
+app.get('/v1/dashboard', authMiddleware, function(req, res) {
+  var wsId = req.workspaceId
+  var now = new Date().toISOString()
+
+  // 所有进行中项目
+  var projects = db.prepare(`
+    SELECT p.*, 
+      (SELECT COUNT(*) FROM comment_cards cc 
+       JOIN images img ON cc.image_id = img.id 
+       JOIN product_units pu ON img.product_unit_id = pu.id 
+       WHERE pu.project_id = p.id AND cc.status = 'unresolved' AND cc.deleted_at IS NULL) as unresolved_count,
+      (SELECT COUNT(*) FROM comment_cards cc 
+       JOIN images img ON cc.image_id = img.id 
+       JOIN product_units pu ON img.product_unit_id = pu.id 
+       WHERE pu.project_id = p.id AND cc.disputed = 1 AND cc.deleted_at IS NULL) as disputed_count
+    FROM projects p WHERE p.workspace_id = ? 
+    AND p.status NOT IN ('completed','archived')
+    ORDER BY p.updated_at DESC
+  `).all(wsId)
+
+  // 健康度计算
+  var healthData = projects.map(function(p) {
+    var health = 'green'
+    var reasons = []
+
+    // 黄灯：有未读意见超24h
+    if (p.unresolved_count > 0) {
+      var oldestUnresolved = db.prepare(`
+        SELECT MIN(cc.created_at) as oldest FROM comment_cards cc
+        JOIN images img ON cc.image_id = img.id
+        JOIN product_units pu ON img.product_unit_id = pu.id
+        WHERE pu.project_id = ? AND cc.status = 'unresolved'
+      `).get(p.id)
+      if (oldestUnresolved && oldestUnresolved.oldest) {
+        var hoursSince = (Date.now() - new Date(oldestUnresolved.oldest + 'Z').getTime()) / (1000 * 60 * 60)
+        if (hoursSince > 24) { health = 'yellow'; reasons.push('有未读意见超过24小时') }
+      }
+    }
+
+    // 红灯：临期或有争议
+    if (p.disputed_count > 0) { health = 'red'; reasons.push('有争议卡片(' + p.disputed_count + '张)') }
+    if (p.deadline) {
+      var hoursLeft = (new Date(p.deadline + 'Z').getTime() - Date.now()) / (1000 * 60 * 60)
+      var warningH = p.warning_hours || 24
+      if (hoursLeft < warningH && p.status !== 'completed') { health = 'red'; reasons.push('临近截止日期(剩余' + Math.round(hoursLeft) + 'h)') }
+    }
+
+    return {
+      id: p.id, name: p.name, clientName: p.client_name || '',
+      status: p.status, deadline: p.deadline,
+      health: health, healthReasons: reasons,
+      unresolvedCount: p.unresolved_count || 0,
+      disputedCount: p.disputed_count || 0,
+      updatedAt: p.updated_at
+    }
+  })
+
+  // 成员负载
+  var members = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND status = ?').all(wsId, 'active')
+  var memberLoads = members.map(function(m) {
+    var assignedCount = db.prepare(`
+      SELECT COUNT(*) as c FROM comment_cards cc
+      JOIN images img ON cc.image_id = img.id
+      JOIN product_units pu ON img.product_unit_id = pu.id
+      JOIN projects p ON pu.project_id = p.id
+      WHERE cc.assignee_id = ? AND cc.status = 'unresolved' AND cc.deleted_at IS NULL
+      AND p.status NOT IN ('completed','archived')
+    `).get(m.id)
+    return { id: m.id, name: m.name, avatarUrl: m.avatar_url, role: m.role, taskCount: assignedCount ? assignedCount.c : 0 }
+  })
+
+  // 统计
+  var stats = {
+    total: db.prepare('SELECT COUNT(*) as c FROM projects WHERE workspace_id = ?').get(wsId).c,
+    active: db.prepare('SELECT COUNT(*) as c FROM projects WHERE workspace_id = ? AND status NOT IN (\'completed\',\'archived\')').get(wsId).c,
+    red: healthData.filter(function(h) { return h.health === 'red' }).length,
+    yellow: healthData.filter(function(h) { return h.health === 'yellow' }).length,
+    totalUnresolved: healthData.reduce(function(s, h) { return s + h.unresolvedCount }, 0)
+  }
+
+  res.json({ data: { stats: stats, projects: healthData, memberLoads: memberLoads, updatedAt: now } })
+})
+
+// F-17: 指派修图师
+app.put('/v1/comment-cards/:id/assign', authMiddleware, function(req, res) {
+  var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
+  if (!card) return res.status(404).json({ code: 'NOT_FOUND', message: '意见卡片不存在' })
+
+  var assigneeId = req.body.assigneeId
+  if (assigneeId) {
+    var assignee = db.prepare('SELECT * FROM users WHERE id = ? AND workspace_id = ?').get(assigneeId, req.workspaceId)
+    if (!assignee) return res.status(400).json({ code: 'INVALID_ASSIGNEE', message: '指派人不存在' })
+  }
+
+  db.prepare('UPDATE comment_cards SET assignee_id = ? WHERE id = ?').run(assigneeId || null, card.id)
+
+  // 发送通知给被指派人
+  if (assigneeId) {
+    createNotification(req.workspaceId, assigneeId, 'assign',
+      '新任务指派', '你被指派了新的修改任务',
+      '/project/' + getProjectIdByCard(card.id), null, card.id)
+    // V1.2.0: 邮件通知
+    if (assignee.email) {
+      sendEmail(assignee.email, '【易拍选】新任务指派', '<p>你被指派了新的修改任务，请登录易拍选查看详情。</p>')
+    }
+  }
+
+  var updated = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(card.id)
+  res.json({ data: formatCommentCard(updated) })
+})
+
+// F-17: 争议状态标记
+app.put('/v1/comment-cards/:id/dispute', authMiddleware, function(req, res) {
+  var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
+  if (!card) return res.status(404).json({ code: 'NOT_FOUND', message: '意见卡片不存在' })
+
+  var action = req.body.action // 'resolve' → 增加争议计数, 'acknowledge' → 老板确认消除争议
+
+  if (action === 'resolve') {
+    var newCount = (card.dispute_count || 0) + 1
+    var disputed = newCount >= 2 ? 1 : 0
+    db.prepare('UPDATE comment_cards SET dispute_count = ?, disputed = ? WHERE id = ?').run(newCount, disputed, card.id)
+
+    if (disputed) {
+      // 通知所有owner
+      var owners = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND role = ?').all(req.workspaceId, 'owner')
+      owners.forEach(function(o) {
+        createNotification(req.workspaceId, o.id, 'dispute',
+          '争议预警', '【' + getCardContext(card.id) + '】意见被反复驳回，已标记为争议',
+          '/project/' + getProjectIdByCard(card.id), null, card.id)
+        // V1.2.0: 邮件通知
+        sendEmail(o.email, '【易拍选】争议预警', '<p>意见卡「' + getCardContext(card.id) + '」被反复驳回，已标记为争议，请登录处理。</p>')
+      })
+    }
+  } else if (action === 'acknowledge') {
+    db.prepare('UPDATE comment_cards SET dispute_count = 0, disputed = 0 WHERE id = ?').run(card.id)
+  }
+
+  var updated = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(card.id)
+  res.json({ data: formatCommentCard(updated) })
+})
+
+// F-25: 修图师待办列表
+app.get('/v1/my-tasks', authMiddleware, function(req, res) {
+  var userId = req.userId
+  var cards = db.prepare(`
+    SELECT cc.*, p.name as project_name, p.id as project_id, img.thumbnail_urls
+    FROM comment_cards cc
+    JOIN images img ON cc.image_id = img.id
+    JOIN product_units pu ON img.product_unit_id = pu.id
+    JOIN projects p ON pu.project_id = p.id
+    WHERE cc.assignee_id = ? AND cc.status = 'unresolved' AND cc.deleted_at IS NULL
+    AND p.status NOT IN ('completed','archived')
+    ORDER BY cc.disputed DESC, cc.created_at ASC
+  `).all(userId)
+
+  var tasks = cards.map(function(c) {
+    var card = formatCommentCard(c)
+    card.projectName = c.project_name
+    card.projectId = c.project_id
+    card.thumbnailUrl = JSON.parse(c.thumbnail_urls || '[]')[0] || ''
+    card.priority = c.disputed ? 'dispute' : (c.deadline ? 'urgent' : 'normal')
+    return card
+  })
+
+  res.json({ data: tasks, total: tasks.length })
+})
+
+// F-19: 通知列表
+app.get('/v1/notifications', authMiddleware, function(req, res) {
+  var limit = parseInt(req.query.limit) || 50
+  var offset = parseInt(req.query.offset) || 0
+  var notifications = db.prepare(
+    'SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?'
+  ).all(req.userId, limit, offset)
+  var unreadCount = db.prepare(
+    'SELECT COUNT(*) as c FROM notifications WHERE user_id = ? AND is_read = 0'
+  ).get(req.userId)
+
+  res.json({ data: notifications.map(formatNotification), total: unreadCount.c, unread: unreadCount.c })
+})
+
+// F-19: 标记通知已读
+app.put('/v1/notifications/:id/read', authMiddleware, function(req, res) {
+  db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?').run(req.params.id, req.userId)
+  res.json({ data: { ok: true } })
+})
+
+// F-19: 全部标记已读
+app.put('/v1/notifications/read-all', authMiddleware, function(req, res) {
+  db.prepare('UPDATE notifications SET is_read = 1 WHERE user_id = ?').run(req.userId)
+  res.json({ data: { ok: true } })
+})
+
+// F-19: 项目预警设置
+app.put('/v1/projects/:id/warning-settings', authMiddleware, function(req, res) {
+  var project = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!project) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
+  var hours = parseInt(req.body.warningHours) || 24
+  db.prepare('UPDATE projects SET warning_hours = ? WHERE id = ?').run(hours, project.id)
+  res.json({ data: { warningHours: hours } })
+})
+
+// F-16: AI智能筛选 — 按自然语言描述筛选图片
+app.post('/v1/projects/:id/images/filter', authMiddleware, function(req, res) {
+  var projectId = req.params.id
+  var query = (req.body.query || '').toLowerCase().trim()
+  if (!query) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '请输入筛选条件' })
+
+  // 获取所有图片
+  var images = db.prepare(`
+    SELECT i.* FROM images i JOIN product_units pu ON i.product_unit_id = pu.id
+    WHERE pu.project_id = ?
+  `).all(projectId)
+
+  // 行话模板库
+  var jargonTemplates = {
+    '去雾': { contrast: 15, dehaze: 20, clarity: 10 },
+    '背景不够白': { operation: 'bg_white_check', threshold: 250 },
+    '背景不纯': { operation: 'bg_white_check', threshold: 250 },
+    '雾蒙蒙的': { operation: 'dehaze_check', threshold: 0.5 },
+    '过曝': { operation: 'overexposure_check', threshold: 0.85 },
+    '欠曝': { operation: 'underexposure_check', threshold: 0.15 },
+    '太暗': { operation: 'underexposure_check', threshold: 0.2 },
+    '偏色': { operation: 'color_balance_check', threshold: 0.3 },
+    '白平衡不准': { operation: 'wb_check', threshold: 0.2 },
+    '对比度低': { operation: 'contrast_check', threshold: 0.3 },
+    '饱和度低': { operation: 'saturation_check', threshold: 0.3 },
+    '噪点多': { operation: 'noise_check', threshold: 0.4 },
+    '模糊': { operation: 'sharpness_check', threshold: 0.5 },
+    '不够锐': { operation: 'sharpness_check', threshold: 0.5 },
+    '暖色调': { operation: 'color_temp_check', target: 'warm' },
+    '冷色调': { operation: 'color_temp_check', target: 'cool' },
+    '裁剪不当': { operation: 'crop_check', threshold: 0.3 },
+    '构图不好': { operation: 'crop_check', threshold: 0.3 },
+  }
+
+  // 匹配行话模板
+  var matchedTemplate = null
+  var matchedKeyword = ''
+  for (var key in jargonTemplates) {
+    if (query.indexOf(key) !== -1) {
+      matchedTemplate = jargonTemplates[key]
+      matchedKeyword = key
+      break
+    }
+  }
+
+  // AI 模拟筛选
+  var matched = []
+  var unmatched = []
+
+  images.forEach(function(img, idx) {
+    // 基于文件名和索引模拟AI分析结果
+    var filename = (img.original_filename || img.filename || '').toLowerCase()
+    var isMatch = false
+
+    if (matchedTemplate) {
+      // 模拟：基于索引的伪随机匹配（30-60%匹配率）
+      var hash = 0
+      for (var i = 0; i < (img.id || '').length; i++) {
+        hash = ((hash << 5) - hash) + (img.id || '').charCodeAt(i)
+        hash = hash & hash
+      }
+      var score = Math.abs(hash % 100) / 100
+      isMatch = score > 0.4
+    } else {
+      // 自由文本搜索：匹配文件名
+      isMatch = filename.indexOf(query) !== -1
+    }
+
+    var entry = {
+      id: img.id,
+      filename: img.original_filename || img.filename,
+      thumbnailUrl: JSON.parse(img.thumbnail_urls || '[]')[0] || '',
+      unitId: img.product_unit_id
+    }
+
+    if (isMatch) matched.push(entry)
+    else unmatched.push(entry)
+  })
+
+  // 构建上下文建议
+  var suggestion = null
+  if (matchedTemplate) {
+    if (matchedTemplate.operation === 'bg_white_check') {
+      suggestion = { type: 'color_correction', description: '建议将背景RGB值调整至(255,255,255)', params: { targetR: 255, targetG: 255, targetB: 255 } }
+    } else if (matchedTemplate.operation === 'dehaze_check') {
+      suggestion = { type: 'basic_adjustment', description: '建议应用去雾参数：对比度+15，去朦胧+20，清晰度+10', params: matchedTemplate }
+    } else if (matchedTemplate.operation === 'overexposure_check') {
+      suggestion = { type: 'exposure', description: '建议降低曝光度 -0.5EV', params: { exposure: -0.5 } }
+    } else if (matchedTemplate.operation === 'underexposure_check') {
+      suggestion = { type: 'exposure', description: '建议提升曝光度 +0.5EV', params: { exposure: 0.5 } }
+    } else {
+      suggestion = { type: 'basic_adjustment', description: '匹配到行话模板：「' + matchedKeyword + '」', params: matchedTemplate }
+    }
+  }
+
+  res.json({
+    data: {
+      query: query,
+      matchedKeyword: matchedKeyword,
+      matched: matched,
+      unmatched: unmatched,
+      total: images.length,
+      suggestion: suggestion
+    }
+  })
+})
+
+// F-16: 行话模板库列表
+app.get('/v1/jargon-templates', authMiddleware, function(req, res) {
+  var templates = [
+    { key: '去雾', label: '去雾', description: '去朦胧+对比度+清晰度综合调整', params: { contrast: 15, dehaze: 20, clarity: 10 } },
+    { key: '背景不够白', label: '背景不够白', description: '检查白底图RGB值是否达到标准', params: { operation: 'bg_white_check', threshold: 250 } },
+    { key: '过曝', label: '过曝', description: '检测过曝区域', params: { operation: 'overexposure_check', threshold: 0.85 } },
+    { key: '太暗', label: '太暗/欠曝', description: '检测欠曝区域', params: { operation: 'underexposure_check', threshold: 0.2 } },
+    { key: '偏色', label: '偏色', description: '检测色偏问题', params: { operation: 'color_balance_check', threshold: 0.3 } },
+    { key: '白平衡不准', label: '白平衡不准', description: '检测白平衡偏差', params: { operation: 'wb_check', threshold: 0.2 } },
+    { key: '模糊', label: '模糊/不够锐', description: '检测画面清晰度', params: { operation: 'sharpness_check', threshold: 0.5 } },
+    { key: '饱和度低', label: '饱和度低', description: '检测色彩饱和度', params: { operation: 'saturation_check', threshold: 0.3 } },
+    { key: '噪点多', label: '噪点多', description: '检测画面噪点', params: { operation: 'noise_check', threshold: 0.4 } },
+    { key: '对比度低', label: '对比度低', description: '检测画面对比度', params: { operation: 'contrast_check', threshold: 0.3 } },
+  ]
+  res.json({ data: templates })
+})
+
+// F-23: 项目模板 CRUD
+app.get('/v1/templates', authMiddleware, function(req, res) {
+  var templates = db.prepare('SELECT * FROM project_templates WHERE workspace_id = ? ORDER BY created_at DESC').all(req.workspaceId)
+  res.json({ data: templates.map(formatTemplate) })
+})
+
+app.post('/v1/templates', authMiddleware, function(req, res) {
+  var name = (req.body.name || '').trim()
+  var description = (req.body.description || '').trim()
+  if (!name) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '模板名称必填' })
+
+  var assigneeMap = req.body.assigneeMap ? JSON.stringify(req.body.assigneeMap) : '{}'
+  var deliveryRules = req.body.deliveryRules ? JSON.stringify(req.body.deliveryRules) : '{}'
+
+  var id = uuidv4()
+  db.prepare('INSERT INTO project_templates (id,workspace_id,name,description,assignee_map,delivery_rules) VALUES (?,?,?,?,?,?)')
+    .run(id, req.workspaceId, name, description, assigneeMap, deliveryRules)
+
+  var template = db.prepare('SELECT * FROM project_templates WHERE id = ?').get(id)
+  res.status(201).json({ data: formatTemplate(template) })
+})
+
+app.put('/v1/templates/:id', authMiddleware, function(req, res) {
+  var template = db.prepare('SELECT * FROM project_templates WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!template) return res.status(404).json({ code: 'NOT_FOUND', message: '模板不存在' })
+
+  var name = req.body.name !== undefined ? (req.body.name || '').trim() : template.name
+  var description = req.body.description !== undefined ? (req.body.description || '').trim() : template.description
+  var assigneeMap = req.body.assigneeMap ? JSON.stringify(req.body.assigneeMap) : template.assignee_map
+  var deliveryRules = req.body.deliveryRules ? JSON.stringify(req.body.deliveryRules) : template.delivery_rules
+
+  db.prepare('UPDATE project_templates SET name=?,description=?,assignee_map=?,delivery_rules=? WHERE id=?')
+    .run(name, description, assigneeMap, deliveryRules, template.id)
+
+  var updated = db.prepare('SELECT * FROM project_templates WHERE id = ?').get(template.id)
+  res.json({ data: formatTemplate(updated) })
+})
+
+app.delete('/v1/templates/:id', authMiddleware, function(req, res) {
+  var template = db.prepare('SELECT * FROM project_templates WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!template) return res.status(404).json({ code: 'NOT_FOUND', message: '模板不存在' })
+  db.prepare('DELETE FROM project_templates WHERE id = ?').run(template.id)
+  res.json({ data: { ok: true } })
+})
+
+// F-23: 基于模板创建项目
+app.post('/v1/projects/from-template/:templateId', authMiddleware, function(req, res) {
+  var template = db.prepare('SELECT * FROM project_templates WHERE id = ? AND workspace_id = ?').get(req.params.templateId, req.workspaceId)
+  if (!template) return res.status(404).json({ code: 'NOT_FOUND', message: '模板不存在' })
+
+  var name = (req.body.name || '').trim()
+  if (!name) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '项目名称必填' })
+
+  var id = uuidv4()
+  var clientName = (req.body.clientName || '').trim()
+  var deadline = req.body.deadline || null
+  var assigneeMap = JSON.parse(template.assignee_map || '{}')
+  var deliveryRules = JSON.parse(template.delivery_rules || '{}')
+
+  db.prepare("INSERT INTO projects (id,workspace_id,name,client_name,status,deadline,metadata) VALUES (?,?,?,?,?,?,?)")
+    .run(id, req.workspaceId, name, clientName, 'draft', deadline,
+      JSON.stringify({ templateId: template.id, templateName: template.name, assigneeMap: assigneeMap, deliveryRules: deliveryRules }))
+
+  var project = db.prepare('SELECT * FROM projects WHERE id = ?').get(id)
+  res.status(201).json({ data: formatProject(project), template: formatTemplate(template) })
+})
+
+function formatTemplate(t) {
+  return {
+    id: t.id,
+    name: t.name,
+    description: t.description,
+    assigneeMap: JSON.parse(t.assignee_map || '{}'),
+    deliveryRules: JSON.parse(t.delivery_rules || '{}'),
+    createdAt: t.created_at
+  }
+}
+
+// 辅助函数：获取卡片所属项目ID
+function getProjectIdByCard(cardId) {
+  var row = db.prepare(`
+    SELECT pu.project_id FROM comment_cards cc
+    JOIN images img ON cc.image_id = img.id
+    JOIN product_units pu ON img.product_unit_id = pu.id
+    WHERE cc.id = ?
+  `).get(cardId)
+  return row ? row.project_id : ''
+}
+
+// 辅助函数：获取卡片上下文
+function getCardContext(cardId) {
+  var row = db.prepare(`
+    SELECT p.name as project_name, pu.name as unit_name, cc.text_content
+    FROM comment_cards cc
+    JOIN images img ON cc.image_id = img.id
+    JOIN product_units pu ON img.product_unit_id = pu.id
+    JOIN projects p ON pu.project_id = p.id
+    WHERE cc.id = ?
+  `).get(cardId)
+  if (!row) return '未知卡片'
+  return (row.project_name || '项目') + '-' + (row.unit_name || '图')
+}
+
+// 辅助函数：创建通知
+function createNotification(wsId, userId, type, title, content, link, projectId, cardId) {
+  var id = uuidv4()
+  db.prepare('INSERT INTO notifications (id,workspace_id,user_id,type,title,content,link,project_id,comment_card_id) VALUES (?,?,?,?,?,?,?,?,?)')
+    .run(id, wsId, userId, type, title, content, link, projectId || null, cardId || null)
+  return id
+}
+
+// =============================================================================
+// V1.2.0: ZIP/PDF Export (G-06)
+// =============================================================================
+app.get('/v1/projects/:projectId/export-zip', authMiddleware, function(req, res) {
+  var projectId = req.params.projectId
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
+  res.set('Content-Type', 'application/zip')
+  res.set('Content-Disposition', 'attachment; filename=project-' + projectId + '.zip')
+
+  var archive = archiver('zip', { zlib: { level: 9 } })
+  archive.on('error', function(err) { log('ERROR', 'Export', 'ZIP error', { error: err.message }); res.status(500).end() })
+  archive.pipe(res)
+
+  // Add project info JSON
+  var units = db.prepare('SELECT * FROM product_units WHERE project_id = ?').all(projectId)
+  var allImages = []
+  var allCards = []
+  units.forEach(function(u) {
+    var imgs = db.prepare('SELECT * FROM images WHERE product_unit_id = ?').all(u.id)
+    allImages = allImages.concat(imgs)
+    imgs.forEach(function(img) {
+      var cards = db.prepare('SELECT * FROM comment_cards WHERE image_id = ? AND deleted_at IS NULL').all(img.id)
+      allCards = allCards.concat(cards.map(function(c) { return formatCommentCard(c) }))
+    })
+  })
+
+  archive.append(JSON.stringify({
+    project: formatProject(proj),
+    units: units,
+    images: allImages.map(function(i) { return { id: i.id, filename: i.original_filename, urls: JSON.parse(i.thumbnail_urls || '[]') } }),
+    commentCards: allCards,
+    exportedAt: new Date().toISOString()
+  }, null, 2), { name: 'project-info.json' })
+
+  // Add PDF report
+  var doc = new PDFDocument({ size: 'A4', margin: 50 })
+  var pdfBuffers = []
+  doc.on('data', function(chunk) { pdfBuffers.push(chunk) })
+  doc.on('end', function() {
+    archive.append(Buffer.concat(pdfBuffers), { name: 'report.pdf' })
+    archive.finalize()
+  })
+
+  doc.fontSize(20).text('易拍选 — 项目报告', { align: 'center' })
+  doc.moveDown()
+  doc.fontSize(14).text('项目名称：' + proj.name)
+  doc.fontSize(12).text('客户：' + (proj.client_name || '未指定'))
+  doc.text('状态：' + proj.status)
+  doc.text('截止日期：' + (proj.deadline || '未设定'))
+  doc.moveDown()
+  doc.fontSize(14).text('意见卡片汇总 (' + allCards.length + ' 条)')
+  allCards.forEach(function(c, i) {
+    doc.fontSize(10).text((i + 1) + '. [' + (c.status === 'resolved' ? '已解决' : '未解决') + '] ' + (c.text || '(无文本)'))
+  })
+  doc.end()
+
+  log('INFO', 'Export', 'ZIP export generated', { projectId: projectId })
+})
+
+// V1.2.0: PDF-only export
+app.get('/v1/projects/:projectId/export-pdf', authMiddleware, function(req, res) {
+  var projectId = req.params.projectId
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+
+  res.set('Content-Type', 'application/pdf')
+  res.set('Content-Disposition', 'attachment; filename=report-' + projectId + '.pdf')
+
+  var doc = new PDFDocument({ size: 'A4', margin: 50 })
+  doc.pipe(res)
+
+  doc.fontSize(20).text('易拍选 — 项目报告', { align: 'center' })
+  doc.moveDown()
+  doc.fontSize(14).text('项目：' + proj.name)
+  doc.fontSize(12).text('客户：' + (proj.client_name || '未指定'))
+  doc.text('状态：' + proj.status)
+  doc.text('导出时间：' + new Date().toISOString())
+  doc.end()
+})
+
+// =============================================================================
+// V1.2.0: Auto-save Draft for Comment Cards (G-07)
+// =============================================================================
+app.put('/v1/comment-cards/:id/draft', authMiddleware, function(req, res) {
+  var card = db.prepare('SELECT * FROM comment_cards WHERE id = ? AND deleted_at IS NULL').get(req.params.id)
+  if (!card) return res.status(404).json({ code: 'NOT_FOUND' })
+
+  if (req.body.draftText !== undefined) {
+    db.prepare('UPDATE comment_cards SET draft_text = ?, draft_updated_at = datetime(\'now\') WHERE id = ?')
+      .run(req.body.draftText, req.params.id)
+  }
+  var updated = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
+  res.json({ data: { id: updated.id, draftText: updated.draft_text, draftUpdatedAt: updated.draft_updated_at } })
+})
+
+// =============================================================================
+// V1.2.0: CDN Signed URL (G-09)
+// =============================================================================
+app.get('/v1/images/:id/signed-url', authMiddleware, function(req, res) {
+  var img = db.prepare('SELECT * FROM images WHERE id = ?').get(req.params.id)
+  if (!img) return res.status(404).json({ code: 'NOT_FOUND' })
+
+  var urls = JSON.parse(img.thumbnail_urls || '[]')
+  var originalUrl = img.original_url || ''
+  res.json({ data: {
+    signedThumbnails: urls.map(function(u) { return generateSignedUrl(u) }),
+    signedOriginal: originalUrl ? generateSignedUrl(originalUrl) : ''
+  }})
+})
+
+// CDN signed URL verification middleware
+app.get('/cdn/:filePath', function(req, res) {
+  var filePath = decodeURIComponent(req.params.filePath)
+  var expires = req.query.expires
+  var sig = req.query.sig
+
+  if (!verifySignedUrl(filePath, expires, sig)) {
+    return res.status(403).json({ code: 'FORBIDDEN', message: '签名无效或已过期' })
+  }
+
+  var absPath = path.join(__dirname, filePath)
+  if (!fs.existsSync(absPath)) return res.status(404).json({ code: 'NOT_FOUND' })
+  res.sendFile(absPath)
+})
+
+// =============================================================================
+// AI Retry & Error Handling (G-02) — wraps AI endpoints
+// =============================================================================
+// Override AI endpoints with retry-aware error responses
+app.post('/v1/ai/style-samples/with-retry', authMiddleware, function(req, res) {
+  var imageId = req.body.imageId
+  var style = req.body.style || 'default'
+  if (!imageId) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少 imageId' })
+
+  var taskId = uuidv4()
+  db.prepare('INSERT INTO ai_samples (id,image_id,style) VALUES (?,?,?)').run(taskId, imageId, style)
+  res.json({ data: { taskId: taskId, retryable: true } })
+})
+
 // =============================================================================
 // Formatters
 // =============================================================================
@@ -1481,7 +2558,7 @@ function formatAnnotation(a) {
   return { id: a.id, imageId: a.image_id, userId: a.user_id, toolType: a.tool_type, coordinates: JSON.parse(a.coordinates || '{}'), style: JSON.parse(a.style || '{}'), strokeData: JSON.parse(a.stroke_data || '[]'), text: a.text_content, createdAt: a.created_at }
 }
 function formatCommentCard(c) {
-  return { id: c.id, annotationId: c.annotation_id, imageId: c.image_id, text: c.text_content, status: c.status, sortOrder: c.sort_order, resolvedBy: c.resolved_by, resolvedAt: c.resolved_at, createdAt: c.created_at }
+  return { id: c.id, annotationId: c.annotation_id, imageId: c.image_id, text: c.text_content, status: c.status, sortOrder: c.sort_order, resolvedBy: c.resolved_by, resolvedAt: c.resolved_at, assigneeId: c.assignee_id, disputeCount: c.dispute_count || 0, disputed: !!c.disputed, draftText: c.draft_text || '', draftUpdatedAt: c.draft_updated_at || null, createdAt: c.created_at }
 }
 function formatRevision(r) {
   return { id: r.id, imageId: r.image_id, commentCardId: r.comment_card_id, uploadedImageUrl: r.uploaded_image_url, diffSummary: JSON.parse(r.diff_summary || '{}'), createdBy: r.created_by, createdAt: r.created_at }
@@ -1491,6 +2568,9 @@ function formatAIInstruction(i) {
 }
 function formatPortfolio(p) {
   return { id: p.id, projectId: p.project_id, name: p.name, description: p.description, coverUrl: p.cover_url, images: JSON.parse(p.images || '[]'), clientName: p.client_name, workspaceLogo: p.workspace_logo, contactInfo: p.contact_info, qrCode: p.qr_code, views: p.views, avgDuration: p.avg_duration, isPublished: !!p.is_published, createdAt: p.created_at }
+}
+function formatNotification(n) {
+  return { id: n.id, workspaceId: n.workspace_id, userId: n.user_id, type: n.type, title: n.title, content: n.content, link: n.link, isRead: !!n.is_read, projectId: n.project_id, commentCardId: n.comment_card_id, createdAt: n.created_at }
 }
 
 // =============================================================================
@@ -1641,6 +2721,14 @@ wss.on('close', function() { clearInterval(heartbeatInterval) })
 // =============================================================================
 // Start Server
 // =============================================================================
+// V1.2: 30天自动清理回收站
+setInterval(function() {
+  var cutoff = new Date(Date.now() - 30 * 86400000).toISOString()
+  db.prepare('DELETE FROM comment_cards WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff)
+  db.prepare('DELETE FROM annotations WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff)
+  db.prepare('DELETE FROM images WHERE deleted_at IS NOT NULL AND deleted_at < ?').run(cutoff)
+}, 3600000) // 每小时执行一次
+
 server.listen(PORT, '0.0.0.0', function() {
   log('INFO', 'Server', 'EpicShot API Server started', {
     port: PORT,

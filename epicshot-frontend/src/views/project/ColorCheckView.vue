@@ -7,6 +7,21 @@
         </button>
         <h1 class="page-title">色差巡检</h1>
       </div>
+      <div class="header-center">
+        <!-- F-22-1: 行业场景预设 -->
+        <div class="scene-presets">
+          <span class="preset-label">巡检模式：</span>
+          <button
+            v-for="s in scenePresets"
+            :key="s.key"
+            class="preset-chip"
+            :class="{ active: selectedScene === s.key }"
+            @click="selectedScene = s.key"
+          >
+            {{ s.label }}
+          </button>
+        </div>
+      </div>
       <div class="header-actions">
         <button class="btn-inspect" @click="runCheck" :disabled="checking">
           <span v-if="checking" class="spinner"></span>
@@ -68,9 +83,13 @@
             </div>
             <p class="result-suggestion">{{ item.suggestion }}</p>
           </div>
-          <button class="btn-ignore" @click="ignoreItem(item.imageId)">
-            忽略
-          </button>
+          <div class="result-actions">
+            <!-- F-20-2: 查看AI修正预览 -->
+            <button class="btn-preview-fix" @click="previewCorrection(item)">AI修正预览</button>
+            <!-- F-22-2: 一键应用修正 -->
+            <button class="btn-apply-fix" @click="applyCorrection(item)">应用修正</button>
+            <button class="btn-ignore" @click="ignoreItem(item.imageId)">忽略</button>
+          </div>
         </div>
       </div>
 
@@ -109,6 +128,32 @@
         </div>
       </div>
     </div>
+
+    <!-- F-20-2: AI修正预览对比弹窗 -->
+    <div v-if="showCompareModal" class="modal-overlay" @click.self="showCompareModal = false">
+      <div class="modal-content compare-modal">
+        <h3 class="modal-title">AI修正预览</h3>
+        <p class="modal-desc">拖动滑块对比原图与AI修正效果</p>
+        <div class="compare-area">
+          <div class="compare-container">
+            <img :src="compareItem?.thumbnailUrl || ''" alt="AI修正" class="compare-img compare-after" />
+            <div class="compare-before-wrap" :style="{ clipPath: 'inset(0 ' + (100 - compareSlider) + '% 0 0)' }">
+              <img :src="compareItem?.thumbnailUrl || ''" alt="原图" class="compare-img compare-before" />
+            </div>
+            <div class="compare-slider-line" :style="{ left: compareSlider + '%' }"></div>
+            <input type="range" min="0" max="100" v-model.number="compareSlider" class="compare-slider-input" />
+          </div>
+          <div class="compare-labels">
+            <span>原图</span>
+            <span>AI修正预览</span>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn-cancel" @click="showCompareModal = false">关闭</button>
+          <button class="btn-confirm" @click="showCompareModal = false; applyCorrection(compareItem!)">应用此修正</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -130,6 +175,18 @@ const progress = ref(0)
 const report = ref<ColorCheckReport | null>(null)
 const ignoredIds = ref<Set<string>>(new Set())
 const checkError = ref(false)
+const showCompareModal = ref(false)
+const compareSlider = ref(50)
+const compareItem = ref<ColorCheckItem | null>(null)
+const selectedScene = ref('ecommerce_white')
+const appliedCorrections = ref<Set<string>>(new Set())
+
+const scenePresets = [
+  { key: 'ecommerce_white', label: '电商白底图' },
+  { key: 'food_warm', label: '美食暖调' },
+  { key: 'portrait', label: '人像肤质' },
+  { key: 'general', label: '通用' },
+]
 
 let progressTimer: ReturnType<typeof setInterval> | null = null
 
@@ -166,6 +223,18 @@ function exportPdf() {
     window.print()
     exporting.value = false
   }, 100)
+}
+
+function previewCorrection(item: ColorCheckItem) {
+  compareItem.value = item
+  compareSlider.value = 50
+  showCompareModal.value = true
+}
+
+function applyCorrection(item: ColorCheckItem) {
+  appliedCorrections.value.add(item.imageId)
+  // 模拟AI后台修正
+  console.log('[ColorCheck] Applied correction for:', item.imageId)
 }
 
 let aborted = false
@@ -580,5 +649,189 @@ onUnmounted(() => {
 
 .result-item--ignored {
   opacity: 0.6;
+}
+
+// F-22-1: 场景预设
+.header-center {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+}
+
+.scene-presets {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preset-label {
+  font-size: 12px;
+  color: $color-text-muted;
+  margin-right: 4px;
+}
+
+.preset-chip {
+  padding: 4px 12px;
+  font-size: 12px;
+  color: $color-text-secondary;
+  background: $color-surface;
+  border: 1px solid $color-border-light;
+  border-radius: 16px;
+  transition: all 0.15s;
+
+  &:hover { border-color: $color-primary; color: $color-primary; }
+  &.active { background: rgba($color-primary, 0.1); border-color: $color-primary; color: $color-primary; }
+}
+
+// F-20-2 & F-22-2: 结果操作按钮
+.result-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-preview-fix {
+  padding: 5px 12px;
+  font-size: 12px;
+  color: $color-primary;
+  border: 1px solid $color-primary;
+  border-radius: $radius-sm;
+  transition: all 0.15s;
+  white-space: nowrap;
+
+  &:hover { background: rgba($color-primary, 0.08); }
+}
+
+.btn-apply-fix {
+  padding: 5px 12px;
+  font-size: 12px;
+  color: #fff;
+  background: $color-success;
+  border-radius: $radius-sm;
+  transition: background 0.15s;
+  white-space: nowrap;
+
+  &:hover { background: #2d9249; }
+}
+
+// 对比弹窗
+.compare-modal {
+  width: 560px;
+}
+
+.compare-area {
+  margin-bottom: 16px;
+}
+
+.compare-container {
+  position: relative;
+  width: 100%;
+  height: 300px;
+  border-radius: $radius-md;
+  overflow: hidden;
+  background: #1a1a2e;
+}
+
+.compare-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.compare-before-wrap {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.compare-slider-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: $color-primary;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.compare-slider-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: col-resize;
+  z-index: 3;
+  margin: 0;
+}
+
+.compare-labels {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 12px 0;
+  font-size: 12px;
+  color: $color-text-muted;
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background: $color-surface;
+  border-radius: $radius-xl;
+  padding: 32px;
+  text-align: center;
+}
+
+.modal-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: $color-text;
+  margin-bottom: 8px;
+}
+
+.modal-desc {
+  font-size: 13px;
+  color: $color-text-secondary;
+  margin-bottom: 16px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+.btn-cancel {
+  padding: 8px 20px;
+  font-size: 14px;
+  color: $color-text-secondary;
+  background: $color-surface-hover;
+  border-radius: $radius-md;
+  &:hover { background: $color-border-light; }
+}
+
+.btn-confirm {
+  padding: 8px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: $color-success;
+  border-radius: $radius-md;
+  &:hover { background: #2d9249; }
 }
 </style>

@@ -22,6 +22,9 @@
         <button class="btn-toolbar" title="色差巡检" @click="router.push(`/project/${projectId}/color-check`)">
           <span>✨</span> 色差巡检
         </button>
+        <button class="btn-toolbar" title="光影一致性巡检" @click="router.push(`/project/${projectId}/consistency-check`)">
+          <span>💡</span> 光影巡检
+        </button>
         <button class="btn-toolbar" title="导出意见" @click="handleExportComments">
           <span>📥</span> 导出意见
         </button>

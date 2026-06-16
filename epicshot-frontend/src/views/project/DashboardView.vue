@@ -92,6 +92,7 @@
             <span class="recent-activity">{{ formatTime(project.recentActivity) }}</span>
           </div>
         </div>
+        <button class="btn-delete-project" @click.stop="confirmDelete(project)" title="删除项目">🗑</button>
       </div>
     </div>
 
@@ -161,6 +162,23 @@
             </button>
           </div>
         </form>
+      </div>
+    </div>
+
+    <!-- V1.2.0: 删除项目确认弹窗 -->
+    <div v-if="deleteTarget" class="modal-overlay" @click.self="deleteTarget = null">
+      <div class="modal-content">
+        <h2 class="modal-title">确认删除项目</h2>
+        <p class="modal-text">
+          确定要删除项目 <strong>「{{ deleteTarget.name || deleteTarget.clientName || '未命名项目' }}」</strong> 吗？
+        </p>
+        <p class="modal-warning">此操作不可撤销，项目下的所有图片、标注和意见卡片将被永久删除。</p>
+        <div class="modal-actions">
+          <button class="btn-cancel" @click="deleteTarget = null" :disabled="deleting">取消</button>
+          <button class="btn-confirm-danger" :disabled="deleting" @click="doDelete">
+            {{ deleting ? '删除中...' : '确认删除' }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -300,6 +318,29 @@ const createForm = ref({
   deadline: '',
   note: '',
 })
+
+// V1.2.0: 删除项目
+const deleteTarget = ref<any>(null)
+const deleting = ref(false)
+
+function confirmDelete(project: any) {
+  deleteTarget.value = project
+}
+
+async function doDelete() {
+  if (!deleteTarget.value) return
+  deleting.value = true
+  try {
+    await projectApi.delete(deleteTarget.value.id)
+    toast.success('项目已删除')
+    deleteTarget.value = null
+    await projectStore.fetchProjects()
+  } catch (e: any) {
+    toast.error(e?.response?.data?.message || '删除失败')
+  } finally {
+    deleting.value = false
+  }
+}
 
 function openCreateModal() {
   createForm.value = { name: '', clientName: '', deadline: '', note: '' }
@@ -703,6 +744,57 @@ onUnmounted(() => {
   justify-content: center;
   z-index: 1000;
   animation: fadeIn 0.2s ease;
+}
+
+.modal-warning {
+  font-size: 13px;
+  color: $color-error;
+  margin-bottom: 16px;
+  padding: 8px 12px;
+  background: rgba($color-error, 0.08);
+  border-left: 3px solid $color-error;
+  border-radius: 4px;
+}
+
+.btn-delete-project {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid $color-border-light;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  opacity: 0;
+  transition: opacity 0.2s, background 0.2s;
+  z-index: 2;
+
+  &:hover {
+    background: $color-error;
+    border-color: $color-error;
+  }
+}
+
+.project-card:hover .btn-delete-project {
+  opacity: 1;
+}
+
+.btn-confirm-danger {
+  padding: 8px 20px;
+  border-radius: $radius-base;
+  background: $color-error;
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+
+  &:hover { background: darken($color-error, 10%); }
+  &:disabled { opacity: 0.6; cursor: not-allowed; }
 }
 
 .modal-content {

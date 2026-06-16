@@ -130,26 +130,53 @@
       </button>
     </div>
 
-    <!-- 确稿前预览弹窗 -->
+    <!-- 确稿前对比预览弹窗（F-18-1） -->
     <div v-if="showPreviewModal" class="modal-overlay" @click.self="showPreviewModal = false">
       <div class="modal-content preview-modal">
         <h3 class="modal-title">确稿确认</h3>
-        <p class="modal-desc">请确认以下意见处理结果后点击「确稿」</p>
+        <p class="modal-desc">请拖动滑块对比修改前后效果，确认无误后点击「确稿」</p>
 
-        <div class="preview-list">
-          <div v-for="(card, idx) in cards" :key="card.id" class="preview-item">
-            <span class="preview-index">#{{ idx + 1 }}</span>
-            <span class="preview-text">{{ card.text }}</span>
-            <span
-              class="preview-state"
-              :class="cardStates[card.id] === 'confirmed' ? 'state-confirmed' : 'state-modify'"
-            >
-              {{ cardStates[card.id] === 'confirmed' ? '已确认' : '待修改' }}
-            </span>
+        <!-- 对比区域 -->
+        <div class="compare-area" v-if="currentImageUrl">
+          <div class="compare-container">
+            <img :src="currentImageUrl" alt="修改后" class="compare-img compare-after" />
+            <div class="compare-before-wrap" :style="{ clipPath: 'inset(0 ' + (100 - compareSlider) + '% 0 0)' }">
+              <img :src="originalImageUrl || currentImageUrl" alt="修改前" class="compare-img compare-before" />
+            </div>
+            <div class="compare-slider-line" :style="{ left: compareSlider + '%' }"></div>
+            <input
+              type="range"
+              min="0"
+              max="100"
+              v-model.number="compareSlider"
+              class="compare-slider-input"
+            />
+          </div>
+          <div class="compare-labels">
+            <span>修改前</span>
+            <span>修改后</span>
           </div>
         </div>
 
-        <p class="modal-warning" v-if="pendingCount > 0">
+        <div class="preview-detail-section">
+          <button class="btn-detail-toggle" @click="showModifyDetails = !showModifyDetails">
+            {{ showModifyDetails ? '收起' : '查看修改详情' }} ({{ cards.length }} 条)
+          </button>
+          <div v-if="showModifyDetails" class="preview-list">
+            <div v-for="(card, idx) in cards" :key="card.id" class="preview-item">
+              <span class="preview-index">#{{ idx + 1 }}</span>
+              <span class="preview-text">{{ card.text }}</span>
+              <span
+                class="preview-state"
+                :class="cardStates[card.id] === 'confirmed' ? 'state-confirmed' : 'state-modify'"
+              >
+                {{ cardStates[card.id] === 'confirmed' ? '已确认' : '待修改' }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <p class="modal-warning" v-if="pendingCount > 0 && !showModifyDetails">
           还有 {{ pendingCount }} 条意见未标记确认
         </p>
 
@@ -166,13 +193,40 @@
       </div>
     </div>
 
-    <!-- 确稿成功弹窗 -->
+    <!-- 确稿成功弹窗（F-18-2：确稿后客户只能申请修改） -->
     <div v-if="showCompleteModal" class="modal-overlay" @click.self="goToDownload">
       <div class="modal-content">
         <span class="modal-icon">🎉</span>
         <h3 class="modal-title">确稿成功</h3>
-        <p class="modal-text">所有意见已确认，即将跳转到下载页面</p>
-        <button class="btn-download" @click="goToDownload">前往下载</button>
+        <p class="modal-text">所有意见已确认。如需修改，请点击「申请修改」通知工作室</p>
+        <div class="modal-actions modal-actions--center">
+          <button class="btn-request-modify" @click="requestModification">申请修改</button>
+          <button class="btn-download" @click="goToDownload">前往下载</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 申请修改弹窗 -->
+    <div v-if="showModifyRequestModal" class="modal-overlay" @click.self="showModifyRequestModal = false">
+      <div class="modal-content">
+        <h3 class="modal-title">申请修改</h3>
+        <p class="modal-text">请描述需要修改的内容，工作室将收到通知</p>
+        <textarea
+          v-model="modifyRequestText"
+          class="modify-request-input"
+          placeholder="请描述需要修改的内容..."
+          rows="3"
+        ></textarea>
+        <div class="modal-actions">
+          <button class="btn-cancel" @click="showModifyRequestModal = false">取消</button>
+          <button
+            class="btn-confirm"
+            :disabled="!modifyRequestText.trim() || submittingRequest"
+            @click="submitModifyRequest"
+          >
+            {{ submittingRequest ? '提交中...' : '提交申请' }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -200,7 +254,13 @@ const loading = ref(true)
 const confirming = ref(false)
 const showCompleteModal = ref(false)
 const showPreviewModal = ref(false)
+const showModifyRequestModal = ref(false)
+const showModifyDetails = ref(false)
+const compareSlider = ref(50)
+const modifyRequestText = ref('')
+const submittingRequest = ref(false)
 const replySubmitting = ref<Record<string, boolean>>({})
+const originalImageUrl = ref('')
 
 const pendingCount = computed(() => {
   return cards.value.filter(c => cardStates.value[c.id] !== 'confirmed').length
@@ -312,6 +372,28 @@ async function confirmAll() {
 function goToDownload() {
   showCompleteModal.value = false
   router.push(`/client/assets?token=${shareToken.value}`)
+}
+
+function requestModification() {
+  showCompleteModal.value = false
+  showModifyRequestModal.value = true
+}
+
+async function submitModifyRequest() {
+  if (!modifyRequestText.value.trim()) return
+  submittingRequest.value = true
+  try {
+    if (project.value) {
+      await projectApi.requestModification(project.value.id, modifyRequestText.value.trim())
+    }
+    showModifyRequestModal.value = false
+    modifyRequestText.value = ''
+    toast.success('修改申请已提交，工作室将尽快处理')
+  } catch (e: any) {
+    toast.error('提交失败: ' + (e?.response?.data?.message || e?.message || '请稍后重试'))
+  } finally {
+    submittingRequest.value = false
+  }
 }
 
 onMounted(() => {
@@ -898,5 +980,112 @@ onMounted(() => {
   &:hover {
     background: $color-primary-dark;
   }
+}
+
+.btn-request-modify {
+  padding: 10px 24px;
+  background: $color-warning;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 500;
+  border-radius: $radius-md;
+  transition: background 0.2s;
+
+  &:hover {
+    background: #d97706;
+  }
+}
+
+.modal-actions--center {
+  justify-content: center;
+}
+
+.modify-request-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  font-size: 14px;
+  color: $color-text;
+  resize: vertical;
+  outline: none;
+  margin-bottom: 16px;
+  background: $color-bg;
+  transition: border-color 0.2s;
+
+  &::placeholder { color: $color-text-muted; }
+  &:focus { border-color: $color-primary; }
+}
+
+// F-18-1: 对比视图
+.compare-area {
+  margin-bottom: 16px;
+}
+
+.compare-container {
+  position: relative;
+  width: 100%;
+  height: 260px;
+  border-radius: $radius-md;
+  overflow: hidden;
+  background: #1a1a2e;
+}
+
+.compare-img {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.compare-before-wrap {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.compare-slider-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: $color-primary;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.compare-slider-input {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: col-resize;
+  z-index: 3;
+  margin: 0;
+}
+
+.compare-labels {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 12px 0;
+  font-size: 12px;
+  color: $color-text-muted;
+}
+
+.preview-detail-section {
+  margin-bottom: 12px;
+}
+
+.btn-detail-toggle {
+  font-size: 13px;
+  color: $color-primary;
+  padding: 4px 0;
+  &:hover { text-decoration: underline; }
 }
 </style>

@@ -66,4 +66,22 @@ export const projectApi = {
 
   submitCardReply: (cardId: string, reply: string) =>
     client.put<ApiResponse<void>>(`/comment-cards/${cardId}`, { text: reply }),
+
+  // V1.1: 保护型确稿
+  requestModification: (projectId: string, reason: string) =>
+    client.post<ApiResponse<void>>(`/projects/${projectId}/modify-request`, { reason }),
+
+  // V1.1: 智能批量筛选
+  filterImages: (projectId: string, query: string) =>
+    client.post<ApiResponse<any>>(`/projects/${projectId}/images/filter`, { query }),
+
+  getJargonTemplates: () =>
+    client.get<ApiResponse<any[]>>('/jargon-templates'),
+
+  // V1.2.0: ZIP/PDF 导出
+  exportZip: (projectId: string) =>
+    client.get(`/projects/${projectId}/export-zip`, { responseType: 'blob' }),
+
+  exportPdf: (projectId: string) =>
+    client.get(`/projects/${projectId}/export-pdf`, { responseType: 'blob' }),
 }

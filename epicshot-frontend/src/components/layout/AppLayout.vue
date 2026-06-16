@@ -14,6 +14,14 @@
 
       <nav class="sidebar-nav">
         <router-link to="/" class="nav-item" :class="{ active: isActive('/') }">
+          <span class="nav-icon">🏠</span>
+          <span class="nav-label" v-if="!sidebarCollapsed">战情室</span>
+        </router-link>
+        <router-link to="/my-tasks" class="nav-item" :class="{ active: isActive('/my-tasks') }">
+          <span class="nav-icon">✅</span>
+          <span class="nav-label" v-if="!sidebarCollapsed">我的待办</span>
+        </router-link>
+        <router-link to="/projects" class="nav-item" :class="{ active: isActive('/projects') }">
           <span class="nav-icon">📋</span>
           <span class="nav-label" v-if="!sidebarCollapsed">项目看板</span>
         </router-link>
@@ -35,6 +43,7 @@
           <slot name="breadcrumb" />
         </div>
         <div class="top-bar-actions">
+          <NotificationBell />
           <button class="btn-icon" @click="goBack" v-if="showBack">
             <span>←</span>
           </button>
@@ -56,6 +65,7 @@
 import { ref, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
+import NotificationBell from '@/components/common/NotificationBell.vue'
 
 const route = useRoute()
 const router = useRouter()

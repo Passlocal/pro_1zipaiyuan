@@ -1,6 +1,6 @@
 import client from './client'
 import type { ApiResponse } from '@/types/api'
-import type { AIStyle, AIStyleTask, AIInstruction, ColorCheckReport, Portfolio, PortfolioImage } from '@/types/models'
+import type { AIStyle, AIStyleTask, AIInstruction, ColorCheckReport, ConsistencyReport, Portfolio, PortfolioImage } from '@/types/models'
 
 export const aiApi = {
   generateSamples: (imageId: string, style: AIStyle, seedCount = 4) =>
@@ -26,6 +26,13 @@ export const aiApi = {
 
   getColorCheckResult: (taskId: string) =>
     client.get<ApiResponse<ColorCheckReport>>(`/ai/color-check/${taskId}`),
+
+  // F-26: AI全图一致性巡检
+  runConsistencyCheck: (projectId: string) =>
+    client.post<ApiResponse<{ taskId: string }>>('/ai/consistency-check', { projectId }),
+
+  getConsistencyCheckResult: (taskId: string) =>
+    client.get<ApiResponse<ConsistencyReport>>(`/ai/consistency-check/${taskId}`),
 }
 
 export const importApi = {

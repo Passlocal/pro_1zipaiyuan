@@ -20,8 +20,20 @@ const routes: RouteRecordRaw[] = [
     children: [
       {
         path: '',
+        name: 'WarRoom',
+        component: () => import('@/views/dashboard/WarRoomView.vue'),
+        meta: { requiresAuth: true }
+      },
+      {
+        path: 'projects',
         name: 'Dashboard',
         component: () => import('@/views/project/DashboardView.vue'),
+        meta: { requiresAuth: true }
+      },
+      {
+        path: 'my-tasks',
+        name: 'MyTasks',
+        component: () => import('@/views/dashboard/MyTasksView.vue'),
         meta: { requiresAuth: true }
       },
       {
@@ -46,6 +58,12 @@ const routes: RouteRecordRaw[] = [
         path: 'project/:id/color-check',
         name: 'ColorCheck',
         component: () => import('@/views/project/ColorCheckView.vue'),
+        meta: { requiresAuth: true }
+      },
+      {
+        path: 'project/:id/consistency-check',
+        name: 'ConsistencyCheck',
+        component: () => import('@/views/project/ConsistencyCheckView.vue'),
         meta: { requiresAuth: true }
       },
       {

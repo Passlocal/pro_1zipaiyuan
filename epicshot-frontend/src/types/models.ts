@@ -143,6 +143,9 @@ export interface CommentCard {
   thumbnailUrl?: string
   resolvedBy?: string
   resolvedAt?: string
+  assigneeId?: string
+  disputeCount: number
+  disputed: boolean
   createdAt: string
 }
 
@@ -229,6 +232,38 @@ export interface ColorCheckReport {
   createdAt: string
 }
 
+// ============ F-26: AI全图一致性巡检 ============
+export interface ConsistencyAnomaly {
+  id: string
+  type: 'light_direction' | 'highlight_position' | 'shadow_angle' | 'color_temperature' | 'exposure' | 'reflection'
+  description: string
+  severity: 'high' | 'medium' | 'low'
+  affectedImageIds: string[]
+  normalImageIds: string[]
+  suggestion: string
+}
+
+export interface SceneGroup {
+  sceneId: string
+  sceneName: string
+  imageCount: number
+  dominantLightDirection: string
+  consistency: 'consistent' | 'inconsistent'
+}
+
+export interface ConsistencyReport {
+  id: string
+  projectId: string
+  totalImages: number
+  totalSceneGroups: number
+  consistentSceneGroups: number
+  inconsistentSceneGroups: number
+  sceneGroups: SceneGroup[]
+  anomalies: ConsistencyAnomaly[]
+  overallScore: number
+  createdAt: string
+}
+
 // ============ 作品集 ============
 export interface Portfolio {
   id: string
@@ -274,4 +309,90 @@ export interface OnlineUser {
   name: string
   avatarUrl: string
   cursorColor: string
+}
+
+// ============ V1.1 战情室 ============
+export type HealthStatus = 'green' | 'yellow' | 'red'
+
+export interface ProjectHealth {
+  id: string
+  name: string
+  clientName: string
+  status: string
+  deadline?: string
+  health: HealthStatus
+  healthReasons: string[]
+  unresolvedCount: number
+  disputedCount: number
+  updatedAt: string
+}
+
+export interface MemberLoad {
+  id: string
+  name: string
+  avatarUrl: string
+  role: string
+  taskCount: number
+}
+
+export interface DashboardStats {
+  total: number
+  active: number
+  red: number
+  yellow: number
+  totalUnresolved: number
+}
+
+export interface DashboardData {
+  stats: DashboardStats
+  projects: ProjectHealth[]
+  memberLoads: MemberLoad[]
+  updatedAt: string
+}
+
+// ============ V1.1 通知 ============
+export type NotificationType = 'annotation' | 'dispute' | 'deadline' | 'status_change' | 'mention' | 'assign' | 'confirm_request'
+
+export const NOTIFICATION_TYPE_LABELS: Record<NotificationType, string> = {
+  annotation: '新批注',
+  dispute: '争议预警',
+  deadline: '截止提醒',
+  status_change: '状态变更',
+  mention: '提及',
+  assign: '任务指派',
+  confirm_request: '确稿请求'
+}
+
+export interface Notification {
+  id: string
+  workspaceId: string
+  userId: string
+  type: NotificationType
+  title: string
+  content: string
+  link: string
+  isRead: boolean
+  projectId?: string
+  commentCardId?: string
+  createdAt: string
+}
+
+// ============ V1.1 修图师待办 ============
+export type TaskPriority = 'dispute' | 'urgent' | 'normal'
+
+export interface MyTask {
+  id: string
+  annotationId: string
+  imageId: string
+  text: string
+  status: string
+  sortOrder: number
+  assigneeId?: string
+  disputeCount: number
+  disputed: boolean
+  projectName: string
+  projectId: string
+  thumbnailUrl: string
+  priority: TaskPriority
+  createdAt: string
 }

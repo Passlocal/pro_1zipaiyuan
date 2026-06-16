@@ -38,45 +38,18 @@
         <button type="submit" class="btn-primary" :disabled="loading">
           {{ loading ? '登录中...' : '登录' }}
         </button>
-        <div class="divider">
-          <span class="divider-text">或</span>
-        </div>
-        <button type="button" class="btn-wechat" @click="openWechatLogin" :disabled="loading">
-          <span class="wechat-icon">💬</span>
-          微信扫码登录
-        </button>
         <p class="form-footer">
           还没有账号？<router-link to="/register" class="link">立即注册</router-link>
           <span class="footer-divider">|</span>
           <a href="#" class="link link--muted" @click.prevent="onForgotPassword">忘记密码</a>
         </p>
       </form>
-
-      <!-- WeChat QR Modal -->
-      <div v-if="showWechatModal" class="wechat-modal-overlay" @click.self="showWechatModal = false">
-        <div class="wechat-modal">
-          <button class="wechat-modal-close" @click="showWechatModal = false">&times;</button>
-          <h3 class="wechat-modal-title">微信扫码登录</h3>
-          <div v-if="wechatPolling" class="wechat-qr-wrap">
-            <img v-if="wechatQrCode" :src="wechatQrCode" alt="微信二维码" class="wechat-qr-img" />
-            <div v-else class="wechat-qr-loading">
-              <span class="spinner"></span>
-              <p>加载中...</p>
-            </div>
-            <p class="wechat-hint">请使用微信扫描二维码</p>
-          </div>
-          <div v-else-if="wechatExpired" class="wechat-expired">
-            <span>二维码已过期</span>
-            <button class="btn-refresh" @click="refreshWechatQr">刷新二维码</button>
-          </div>
-        </div>
-      </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
@@ -89,11 +62,6 @@ const password = ref('')
 const showPassword = ref(false)
 const loading = ref(false)
 const errorMsg = ref('')
-const showWechatModal = ref(false)
-const wechatQrCode = ref('')
-const wechatTicket = ref('')
-const wechatPolling = ref(false)
-const wechatExpired = ref(false)
 
 async function handleLogin() {
   errorMsg.value = ''
@@ -114,72 +82,9 @@ async function handleLogin() {
   }
 }
 
-async function openWechatLogin() {
-  showWechatModal.value = true
-  wechatExpired.value = false
-  wechatQrCode.value = ''
-  try {
-    const qrRes = await authStore.loginWithWechatPreflight()
-    wechatQrCode.value = qrRes.qrcodeDataUrl
-    wechatTicket.value = qrRes.ticket
-    startWechatPolling()
-  } catch (e: any) {
-    errorMsg.value = '微信登录初始化失败'
-    showWechatModal.value = false
-  }
-}
-
-function startWechatPolling() {
-  wechatPolling.value = true
-
-  const TIMEOUT_MS = 90_000 // 90 seconds timeout
-  const startTime = Date.now()
-
-  authStore.loginWithWechat().then(() => {
-    wechatPolling.value = false
-    showWechatModal.value = false
-    const redirect = route.query.redirect as string
-    router.push(redirect || '/')
-  }).catch((err: Error) => {
-    wechatPolling.value = false
-    wechatExpired.value = true
-    wechatQrCode.value = ''
-    errorMsg.value = err.message
-  })
-
-  // Fallback timeout: if polling hangs forever
-  setTimeout(() => {
-    if (wechatPolling.value && Date.now() - startTime >= TIMEOUT_MS) {
-      wechatPolling.value = false
-      wechatExpired.value = true
-      wechatQrCode.value = ''
-    }
-  }, TIMEOUT_MS)
-}
-
-function onWechatKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && showWechatModal.value) {
-    showWechatModal.value = false
-    wechatPolling.value = false
-  }
-}
-
-function refreshWechatQr() {
-  wechatExpired.value = false
-  openWechatLogin()
-}
-
-function onForgotPassword() {
+async function onForgotPassword() {
   errorMsg.value = '请联系管理员重置密码：zhang@epicshot.com'
 }
-
-onMounted(() => {
-  document.addEventListener('keydown', onWechatKeydown)
-})
-
-onUnmounted(() => {
-  document.removeEventListener('keydown', onWechatKeydown)
-})
 </script>
 
 <style lang="scss" scoped>
@@ -333,144 +238,6 @@ onUnmounted(() => {
   padding: 4px;
   opacity: 0.6;
   &:hover { opacity: 1; }
-}
-
-.divider {
-  display: flex;
-  align-items: center;
-  margin: 16px 0;
-  color: $color-text-muted;
-  font-size: 13px;
-
-  &::before, &::after {
-    content: '';
-    flex: 1;
-    height: 1px;
-    background: $color-border;
-  }
-
-  .divider-text {
-    padding: 0 12px;
-  }
-}
-
-.btn-wechat {
-  width: 100%;
-  height: 44px;
-  background: #07c160;
-  color: #fff;
-  font-size: 15px;
-  font-weight: 500;
-  border-radius: $radius-md;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  transition: background 0.2s;
-
-  &:hover:not(:disabled) {
-    background: #06ad56;
-  }
-
-  &:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .wechat-icon {
-    font-size: 20px;
-  }
-}
-
-.wechat-modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.5);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-}
-
-.wechat-modal {
-  background: $color-surface;
-  border-radius: $radius-xl;
-  padding: 32px;
-  text-align: center;
-  position: relative;
-  width: 320px;
-}
-
-.wechat-modal-close {
-  position: absolute;
-  top: 12px;
-  right: 16px;
-  font-size: 24px;
-  color: $color-text-muted;
-  background: none;
-  border: none;
-  cursor: pointer;
-  line-height: 1;
-}
-
-.wechat-modal-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: $color-text;
-  margin-bottom: 20px;
-}
-
-.wechat-qr-wrap {
-  .wechat-qr-img {
-    width: 200px;
-    height: 200px;
-    border: 1px solid $color-border;
-    border-radius: $radius-md;
-  }
-
-  .wechat-hint {
-    margin-top: 12px;
-    font-size: 13px;
-    color: $color-text-secondary;
-  }
-}
-
-.wechat-qr-loading {
-  width: 200px;
-  height: 200px;
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid $color-border;
-  border-radius: $radius-md;
-  color: $color-text-muted;
-  font-size: 14px;
-  gap: 12px;
-}
-
-.wechat-expired {
-  padding: 20px;
-  font-size: 14px;
-  color: $color-text-secondary;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-}
-
-.btn-refresh {
-  padding: 6px 18px;
-  background: $color-primary;
-  color: #fff;
-  font-size: 13px;
-  border-radius: $radius-md;
-  transition: background 0.2s;
-
-  &:hover {
-    background: $color-primary-dark;
-  }
 }
 
 @keyframes fadeIn {

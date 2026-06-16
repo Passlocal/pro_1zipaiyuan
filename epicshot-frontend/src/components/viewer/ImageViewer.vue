@@ -107,6 +107,7 @@ const emit = defineEmits<{
   (e: 'prev'): void
   (e: 'next'): void
   (e: 'fullscreen-toggle', active: boolean): void
+  (e: 'tool-toggle'): void
 }>()
 
 const store = useAnnotationStore()
@@ -127,6 +128,7 @@ const displayWidth = ref(0)
 const displayHeight = ref(0)
 
 const isDrawing = ref(false)
+const spaceHeld = ref(false)
 const drawStartX = ref(0)
 const drawStartY = ref(0)
 const currentStroke: number[][] = []
@@ -949,8 +951,8 @@ function handleKeydown(event: KeyboardEvent): void {
 }
 
 function onGlobalKeydown(event: KeyboardEvent): void {
+  // F-21-2: 空格按住=临时抓手
   if (event.code === 'Space' && !event.repeat) {
-    // Only intercept space if the container or its children are focused
     const el = document.activeElement
     if (el && (el === containerRef.value || containerRef.value?.contains(el))) {
       event.preventDefault()
@@ -958,6 +960,17 @@ function onGlobalKeydown(event: KeyboardEvent): void {
       if (containerRef.value) {
         containerRef.value.style.cursor = 'grab'
       }
+      return
+    }
+  }
+
+  // F-21-1: A键切换画笔/箭头
+  if (event.key.toLowerCase() === 'a' && !event.ctrlKey && !event.metaKey) {
+    const el = document.activeElement
+    const tag = el ? el.tagName.toLowerCase() : ''
+    if (tag !== 'input' && tag !== 'textarea' && !el?.getAttribute('contenteditable')) {
+      event.preventDefault()
+      emit('tool-toggle')
       return
     }
   }
