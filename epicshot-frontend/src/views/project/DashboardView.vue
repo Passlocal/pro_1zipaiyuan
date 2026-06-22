@@ -3,7 +3,19 @@
     <!-- 顶部标题栏 -->
     <div class="dashboard-header">
       <h1 class="page-title">项目看板</h1>
-      <button class="btn-create" @click="openCreateModal">+ 新建项目</button>
+      <div class="header-right">
+        <button class="btn-export" @click="showExportPopup = !showExportPopup">
+          <Upload :size="14" /> 导出
+        </button>
+        <button class="btn-secondary" @click="toggleBatchMode" :class="{ active: batchMode }">
+          <CheckSquare :size="14" /> {{ batchMode ? '取消' : '批量操作' }}
+        </button>
+        <div v-if="showExportPopup" class="export-popup" @click.stop>
+          <button class="export-option" @click="exportDashboard('pdf')"><FileText :size="14" /> PDF 报告</button>
+          <button class="export-option" @click="exportDashboard('xlsx')"><BarChart3 :size="14" /> Excel 报表</button>
+        </div>
+        <button class="btn-create" @click="openCreateModal">+ 新建项目</button>
+      </div>
     </div>
 
     <!-- 统计概览 -->
@@ -48,7 +60,7 @@
             placeholder="搜索项目名称或客户..."
             @input="onSearchInput"
           />
-          <span class="search-icon">🔍</span>
+          <Search :size="14" class="search-icon" />
         </div>
         <label class="toggle-unprocessed">
           <input type="checkbox" v-model="showUnprocessedOnly" />
@@ -63,7 +75,7 @@
           </select>
         </div>
         <div class="template-wrap">
-          <button class="btn-template" @click="saveTemplate">保存为模板</button>
+          <button class="btn-template" @click="saveTemplate">保存为筛选模板</button>
           <select v-model="selectedTemplate" class="template-select" @change="loadTemplate">
             <option value="">加载模板...</option>
             <option v-for="t in savedTemplates" :key="t.id" :value="t.id">{{ t.name }}</option>
@@ -78,9 +90,22 @@
       <button class="btn-clear-filter" @click="clearAllFilters">清除筛选</button>
     </div>
 
+    <!-- V1.19: 批量操作工具栏 -->
+    <div v-if="batchMode" class="batch-toolbar">
+      <span class="batch-count">已选 {{ selectedProjectIds.size }} 个项目</span>
+      <button class="btn-sm" @click="selectAllProjects">{{ selectedProjectIds.size === projectStore.projects.length ? '取消全选' : '全选' }}</button>
+      <!-- FB-009: 全选筛选结果 -->
+      <button v-if="activeStatus" class="btn-sm btn-all-filtered" @click="selectAllFiltered">全选筛选结果</button>
+      <button class="btn-sm btn-warning" @click="batchArchive" :disabled="selectedProjectIds.size === 0">批量归档</button>
+      <button class="btn-sm" @click="showBatchDeadline = true" :disabled="selectedProjectIds.size === 0">批量修改截止日期</button>
+      <button class="btn-sm btn-danger" @click="batchDelete" :disabled="selectedProjectIds.size === 0">批量删除</button>
+      <input v-if="showBatchDeadline" type="date" v-model="batchDeadline" class="form-input" style="width:140px" />
+      <button v-if="showBatchDeadline" class="btn-sm btn-primary" @click="confirmBatchDeadline">确认</button>
+    </div>
+
     <!-- 项目卡片网格 -->
-    <div v-if="projectStore.loading" class="loading-state">
-      <span class="loading-pulse">加载中...</span>
+    <div v-if="projectStore.loading" class="skeleton-grid">
+      <div v-for="i in 6" :key="'card-' + i" class="skeleton skeleton-project-card"></div>
     </div>
     <div v-else-if="loadError" class="error-state">
       <span class="error-icon">⚠️</span>
@@ -94,11 +119,14 @@
     </div>
     <div v-else class="project-grid">
       <div
-        v-for="project in sortedProjects"
+        v-for="(project, index) in sortedProjects"
         :key="project.id"
         class="project-card"
-        @click="goToProject(project.id)"
+        @click="handleProjectCardClick(project, index, $event)"
       >
+        <div v-if="batchMode" class="project-checkbox" @click.stop>
+          <input type="checkbox" :checked="selectedProjectIds.has(project.id)" @change="toggleProjectSelect(project.id)" />
+        </div>
         <div class="card-thumbnail">
           <img v-if="projectThumbnails[project.id]" :src="projectThumbnails[project.id]" :alt="project.name || project.clientName || '项目'" />
           <div v-else class="thumbnail-placeholder">
@@ -164,6 +192,36 @@
               rows="3"
             ></textarea>
           </div>
+          <div class="form-group">
+            <label class="form-label">合同金额（元）</label>
+            <input
+              v-model.number="createForm.contractAmount"
+              type="number"
+              step="0.01"
+              min="0"
+              placeholder="选填，用于财务统计"
+              class="form-input"
+            />
+          </div>
+          <button
+            type="button"
+            class="btn-add-stage"
+            @click="addPaymentStage"
+            v-if="createForm.paymentStages.length < 5"
+          >
+            + 添加付款阶段
+          </button>
+          <div v-if="createForm.paymentStages.length > 0" class="payment-stages">
+            <div v-for="(stage, idx) in createForm.paymentStages" :key="idx" class="payment-stage-row">
+              <input v-model="stage.name" type="text" placeholder="阶段名称" class="form-input stage-name" />
+              <input v-model.number="stage.amount" type="number" step="0.01" min="0" placeholder="金额" class="form-input stage-amount" />
+              <span class="stage-ratio" v-if="createForm.contractAmount > 0">{{ ((stage.amount / createForm.contractAmount) * 100).toFixed(0) }}%</span>
+              <button type="button" class="btn-remove-stage" @click="removePaymentStage(idx)">×</button>
+            </div>
+            <div v-if="stageTotal !== createForm.contractAmount && createForm.contractAmount > 0" class="stage-warning">
+              阶段合计 ¥{{ stageTotal }}，与总金额 ¥{{ createForm.contractAmount }} 不一致
+            </div>
+          </div>
           <div
             class="upload-zone"
             :class="{ 'upload-zone--dragover': isDragOver }"
@@ -220,13 +278,52 @@ import client from '@/api/client'
 import { useToast } from '@/composables/useToast'
 import type { ProjectStatus } from '@/types/models'
 import { PROJECT_STATUS_LABELS } from '@/types/models'
+import { Upload, FileText, BarChart3, Search, CheckSquare } from 'lucide-vue-next'
 
 const toast = useToast()
 
 const router = useRouter()
 const projectStore = useProjectStore()
 
-// 筛选
+// F-51: 导出
+const showExportPopup = ref(false)
+const exporting = ref(false)
+
+async function exportDashboard(format: 'pdf' | 'xlsx') {
+  showExportPopup.value = false
+  exporting.value = true
+  try {
+    const res = await client.get(`/v1/dashboard/export`, {
+      params: { format },
+      responseType: 'blob',
+    })
+    const ext = format === 'pdf' ? 'pdf' : 'xlsx'
+    const mime = format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    const blob = new Blob([res.data], { type: mime })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `dashboard-export.${ext}`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success(`${format === 'pdf' ? 'PDF' : 'Excel'} 导出成功`)
+  } catch (e: any) {
+    console.error('导出失败:', e)
+    toast.error('导出失败，请稍后重试')
+  } finally {
+    exporting.value = false
+  }
+}
+
+function handleClickOutside(e: MouseEvent) {
+  if (showExportPopup.value) {
+    const target = e.target as HTMLElement
+    if (!target.closest('.export-popup') && !target.closest('.btn-export')) {
+      showExportPopup.value = false
+    }
+  }
+}
+
 const filterTabs = [
   { label: '全部', value: '' },
   { label: '草稿', value: 'draft' },
@@ -240,6 +337,119 @@ const activeStatus = ref('')
 const searchQuery = ref('')
 const showUnprocessedOnly = ref(false)
 const sortBy = ref('updatedAt')
+
+// V1.19: 批量操作
+const batchMode = ref(false)
+const selectedProjectIds = ref(new Set<string>())
+const showBatchDeadline = ref(false)
+const batchDeadline = ref('')
+// FB-009: Shift multi-select
+const lastClickedIndex = ref<number | null>(null)
+
+function toggleBatchMode() {
+  batchMode.value = !batchMode.value
+  if (!batchMode.value) {
+    selectedProjectIds.value = new Set()
+    showBatchDeadline.value = false
+    lastClickedIndex.value = null
+  }
+}
+
+function toggleProjectSelect(id: string) {
+  const newSet = new Set(selectedProjectIds.value)
+  if (newSet.has(id)) {
+    newSet.delete(id)
+  } else {
+    newSet.add(id)
+  }
+  selectedProjectIds.value = newSet
+}
+
+// FB-009: Handle project card click in batch mode
+function handleProjectCardClick(project: any, index: number, event: MouseEvent) {
+  if (!batchMode.value) {
+    goToProject(project.id)
+    return
+  }
+  event.preventDefault()
+  if (event.shiftKey && lastClickedIndex.value !== null) {
+    // Shift+click: select range
+    const start = Math.min(lastClickedIndex.value, index)
+    const end = Math.max(lastClickedIndex.value, index)
+    const newSet = new Set(selectedProjectIds.value)
+    for (let i = start; i <= end; i++) {
+      newSet.add(sortedProjects.value[i].id)
+    }
+    selectedProjectIds.value = newSet
+  } else {
+    toggleProjectSelect(project.id)
+    lastClickedIndex.value = index
+  }
+}
+
+function selectAllProjects() {
+  if (selectedProjectIds.value.size === projectStore.projects.length) {
+    selectedProjectIds.value = new Set()
+  } else {
+    selectedProjectIds.value = new Set(projectStore.projects.map(p => p.id))
+  }
+}
+
+// FB-009: 全选筛选结果
+function selectAllFiltered() {
+  const filteredIds = filteredProjects.value.map(p => p.id)
+  if (selectedProjectIds.value.size === filteredIds.length) {
+    selectedProjectIds.value = new Set()
+  } else {
+    selectedProjectIds.value = new Set(filteredIds)
+  }
+}
+
+async function batchArchive() {
+  if (selectedProjectIds.value.size === 0) return
+  try {
+    const res = await client.post('/v1/projects/batch', {
+      ids: Array.from(selectedProjectIds.value),
+      action: 'archive'
+    })
+    const summary = res.data.data.summary
+    alert(`成功归档 ${summary.success} 个项目，${summary.failed} 个跳过`)
+    selectedProjectIds.value = new Set()
+    await loadProjects()
+  } catch (e) { /* ignore */ }
+}
+
+async function batchDelete() {
+  if (selectedProjectIds.value.size === 0) return
+  if (!confirm(`确定要删除选中的 ${selectedProjectIds.value.size} 个项目？已完成的项目将跳过。`)) return
+  try {
+    const res = await client.post('/v1/projects/batch', {
+      ids: Array.from(selectedProjectIds.value),
+      action: 'delete'
+    })
+    const summary = res.data.data.summary
+    alert(`成功删除 ${summary.success} 个项目，${summary.failed} 个跳过`)
+    selectedProjectIds.value = new Set()
+    await loadProjects()
+  } catch (e) { /* ignore */ }
+}
+
+async function confirmBatchDeadline() {
+  if (selectedProjectIds.value.size === 0 || !batchDeadline.value) return
+  try {
+    const res = await client.post('/v1/projects/batch', {
+      ids: Array.from(selectedProjectIds.value),
+      action: 'update-deadline',
+      deadline: batchDeadline.value
+    })
+    const summary = res.data.data.summary
+    alert(`成功修改 ${summary.success} 个项目的截止日期`)
+    showBatchDeadline.value = false
+    batchDeadline.value = ''
+    selectedProjectIds.value = new Set()
+    await loadProjects()
+  } catch (e) { /* ignore */ }
+}
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 
 // 行话模板
@@ -419,7 +629,21 @@ const createForm = ref({
   clientName: '',
   deadline: '',
   note: '',
+  contractAmount: 0,
+  paymentStages: [] as Array<{ name: string; amount: number }>,
 })
+
+const stageTotal = computed(() =>
+  createForm.value.paymentStages.reduce((sum, s) => sum + (s.amount || 0), 0)
+)
+
+function addPaymentStage() {
+  createForm.value.paymentStages.push({ name: '', amount: 0 })
+}
+
+function removePaymentStage(idx: number) {
+  createForm.value.paymentStages.splice(idx, 1)
+}
 
 // V1.2.0: 删除项目
 const deleteTarget = ref<any>(null)
@@ -445,7 +669,7 @@ async function doDelete() {
 }
 
 function openCreateModal() {
-  createForm.value = { name: '', clientName: '', deadline: '', note: '' }
+  createForm.value = { name: '', clientName: '', deadline: '', note: '', contractAmount: 0, paymentStages: [] }
   uploadFiles.value = []
   showCreateModal.value = true
 }
@@ -479,6 +703,10 @@ async function handleCreate() {
     if (createForm.value.clientName.trim()) data.clientName = createForm.value.clientName.trim()
     if (createForm.value.deadline) data.deadline = createForm.value.deadline
     if (createForm.value.note.trim()) data.note = createForm.value.note.trim()
+    if (createForm.value.contractAmount > 0) data.contractAmount = createForm.value.contractAmount
+    if (createForm.value.paymentStages.length > 0) {
+      data.paymentStages = createForm.value.paymentStages
+    }
     // Create project first
     const project = await projectStore.createProject(data)
     // Upload files after project created
@@ -503,14 +731,17 @@ async function handleCreate() {
 onMounted(async () => {
   await loadProjects()
   loadTemplates()
+  document.addEventListener('click', handleClickOutside)
 })
 
 onUnmounted(() => {
   if (searchTimer) clearTimeout(searchTimer)
+  document.removeEventListener('click', handleClickOutside)
 })
 </script>
 
 <style lang="scss" scoped>
+@use 'sass:color';
 @use '@/assets/styles/variables.scss' as *;
 
 .dashboard {
@@ -531,6 +762,64 @@ onUnmounted(() => {
     font-size: 22px;
     font-weight: 600;
     color: $color-text;
+  }
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: relative;
+}
+
+.btn-export {
+  padding: 8px 16px;
+  background: $color-surface;
+  border: 1px solid $color-border;
+  color: $color-text-secondary;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: $radius-md;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  transition: all 0.2s;
+
+  &:hover {
+    background: $color-surface-hover;
+    color: $color-text;
+    border-color: $color-primary;
+  }
+}
+
+.export-popup {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  background: $color-surface;
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  box-shadow: $shadow-lg;
+  z-index: 100;
+  min-width: 160px;
+  padding: 4px;
+  animation: fadeIn 0.15s ease;
+}
+
+.export-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  font-size: 14px;
+  color: $color-text;
+  border-radius: $radius-sm;
+  transition: background 0.15s;
+
+  &:hover {
+    background: $color-surface-hover;
   }
 }
 
@@ -654,12 +943,10 @@ onUnmounted(() => {
 
 .search-icon {
   position: absolute;
-  left: 8px;
+  right: 10px;
   top: 50%;
   transform: translateY(-50%);
-  font-size: 14px;
-  opacity: 0.5;
-  pointer-events: none;
+  color: $color-text-muted;
 }
 
 // 仅未处理开关
@@ -777,6 +1064,30 @@ onUnmounted(() => {
   justify-content: center;
   color: $color-text-secondary;
   font-size: 14px;
+}
+
+// EMO-03: 骨架屏
+.skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  padding-bottom: 24px;
+}
+
+.skeleton-project-card {
+  height: 280px;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 .error-state {
@@ -1005,14 +1316,14 @@ onUnmounted(() => {
 
 .btn-confirm-danger {
   padding: 8px 20px;
-  border-radius: $radius-base;
+  border-radius: $radius-md;
   background: $color-error;
   color: white;
   border: none;
   cursor: pointer;
   font-size: 14px;
 
-  &:hover { background: darken($color-error, 10%); }
+  &:hover { background: color.adjust($color-error, $lightness: -10%); }
   &:disabled { opacity: 0.6; cursor: not-allowed; }
 }
 
@@ -1192,6 +1503,149 @@ onUnmounted(() => {
   &:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+}
+
+// V1.19: 批量操作
+.btn-secondary {
+  padding: 8px 16px;
+  background: $color-surface;
+  border: 1px solid $color-border;
+  color: $color-text-secondary;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: $radius-md;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  transition: all 0.2s;
+
+  &:hover {
+    background: $color-surface-hover;
+    color: $color-text;
+    border-color: $color-primary;
+  }
+
+  &.active {
+    background: rgba($color-primary, 0.08);
+    border-color: $color-primary;
+    color: $color-primary;
+  }
+}
+
+.batch-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: #f0f4ff;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.batch-count {
+  font-weight: 600;
+  font-size: 14px;
+  margin-right: 8px;
+}
+.project-checkbox {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+  }
+}
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid #ccc;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  &:hover:not(:disabled) { background: #f5f5f5; }
+  &:disabled { opacity: 0.5; cursor: not-allowed; }
+}
+.btn-warning { color: #e37400; border-color: #e37400; &:hover:not(:disabled) { background: #fff8e1; } }
+.btn-danger { color: #c62828; border-color: #c62828; &:hover:not(:disabled) { background: #ffebee; } }
+.btn-primary { background: $color-primary; color: #fff; border-color: $color-primary; &:hover:not(:disabled) { background: $color-primary-dark; } }
+
+// Mobile responsive styles
+@media (max-width: 768px) {
+  .dashboard-header {
+    flex-direction: column;
+    gap: 12px;
+    align-items: stretch;
+  }
+
+  .header-right {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .filter-bar {
+    overflow-x: auto;
+    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+    gap: 6px;
+    flex-wrap: nowrap;
+  }
+
+  .filter-tab {
+    white-space: nowrap;
+    flex-shrink: 0;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+
+  .project-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .project-card {
+    padding: 16px;
+  }
+
+  .batch-toolbar {
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+  }
+
+  .stats-bar {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+  }
+
+  .search-input {
+    width: 100%;
+  }
+
+  button, .btn, .filter-tab {
+    min-height: 44px;
+  }
+
+  .modal-content {
+    width: 94vw;
+    padding: 20px 16px;
+  }
+
+  .search-wrap {
+    width: 100%;
+  }
+
+  .filter-right {
+    width: 100%;
+  }
+
+  .dashboard {
+    padding: 16px;
   }
 }
 </style>

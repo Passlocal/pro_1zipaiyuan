@@ -32,9 +32,9 @@ restart_backend() {
   sleep 2
   cd /workspace/epicshot-backend && PORT=3000 node server.js > /dev/null 2>&1 &
   sleep 4
-  # Verify server is up
+  # Verify server is up (use login endpoint since /health returns 404)
   for i in $(seq 1 10); do
-    if curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health 2>/dev/null | grep -q 200; then
+    if curl -s -o /dev/null http://localhost:3000/v1/auth/login -X POST -H 'Content-Type: application/json' -d '{"email":"zhang@epicshot.com","password":"admin123"}' 2>/dev/null; then
       break
     fi
     sleep 1

@@ -9,8 +9,12 @@ Thumbs.db
 
 # Runtime data
 epicshot-backend/data/
+epicshot-backend/data.db
+epicshot-backend/epicshot.db
 epicshot-backend/uploads/originals/
 epicshot-backend/uploads/thumbnails/
+epicshot-backend/uploads/delivery/
+epicshot-backend/certs/
 
 # Test artifacts
 epicshot-frontend/test-results/

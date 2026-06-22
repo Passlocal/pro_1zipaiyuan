@@ -317,4 +317,52 @@ async function handleRegister() {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
+
+@media (max-width: 768px) {
+  .auth-page {
+    padding: 24px 16px;
+    align-items: flex-start;
+  }
+  
+  .auth-card {
+    padding: 32px 20px;
+    width: 100%;
+    border-radius: 0;
+    box-shadow: none;
+    background: transparent;
+  }
+
+  .auth-header {
+    margin-bottom: 16px;
+
+    .logo-icon {
+      font-size: 26px;
+    }
+
+    .logo-text {
+      font-size: 20px;
+    }
+  }
+  
+  .title {
+    font-size: 20px;
+    margin-bottom: 20px;
+  }
+  
+  .form-input {
+    height: 46px;
+    font-size: 16px; /* 防止iOS缩放 */
+  }
+  
+  .btn-primary {
+    height: 48px;
+    font-size: 16px;
+    width: 100%;
+  }
+
+  .form-footer {
+    font-size: 14px;
+    margin-top: 12px;
+  }
+}
 </style>

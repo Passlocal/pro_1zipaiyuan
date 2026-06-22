@@ -1,0 +1,555 @@
+{
+  "results": [
+    {
+      "cat": "AUTH",
+      "id": "1.1.1",
+      "name": "正常登录",
+      "status": "PASS",
+      "detail": "200 357ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.2",
+      "name": "错误密码登录",
+      "status": "PASS",
+      "detail": "401 337ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.3",
+      "name": "缺失密码",
+      "status": "PASS",
+      "detail": "400 2ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.4",
+      "name": "缺失邮箱",
+      "status": "PASS",
+      "detail": "400 6ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.5",
+      "name": "空请求体",
+      "status": "PASS",
+      "detail": "400 2ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.6",
+      "name": "注册-正常",
+      "status": "PASS",
+      "detail": "201 330ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.7",
+      "name": "注册-重复邮箱",
+      "status": "PASS",
+      "detail": "409 2ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.8",
+      "name": "注册-密码过短(<6)",
+      "status": "PASS",
+      "detail": "400 2ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.9",
+      "name": "注册-无效邮箱格式",
+      "status": "PASS",
+      "detail": "400 2ms"
+    },
+    {
+      "cat": "AUTH",
+      "id": "1.1.10",
+      "name": "Token状态检查",
+      "status": "PASS",
+      "detail": "200 5ms"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.1",
+      "name": "创建项目(正常)",
+      "status": "PASS",
+      "detail": "201 4ms"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.2",
+      "name": "创建项目(空名称)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.3",
+      "name": "创建项目(超长名称)",
+      "status": "PASS",
+      "detail": "400 2ms"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.4",
+      "name": "获取项目列表",
+      "status": "PASS",
+      "detail": "200 2ms, count=20"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.5",
+      "name": "获取项目详情",
+      "status": "PASS",
+      "detail": "200 2ms"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.6",
+      "name": "获取不存在的项目",
+      "status": "PASS",
+      "detail": "404 1ms"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.7",
+      "name": "更新项目名称",
+      "status": "PASS",
+      "detail": "200 2ms"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.8",
+      "name": "删除项目",
+      "status": "PASS",
+      "detail": "200 2ms"
+    },
+    {
+      "cat": "PROJ",
+      "id": "1.2.9",
+      "name": "创建项目(无效状态)",
+      "status": "PASS",
+      "detail": "400 2ms"
+    },
+    {
+      "cat": "UNIT",
+      "id": "1.3.1",
+      "name": "批量创建产品单元",
+      "status": "PASS",
+      "detail": "201 3ms"
+    },
+    {
+      "cat": "UNIT",
+      "id": "1.3.2",
+      "name": "获取产品单元列表",
+      "status": "PASS",
+      "detail": "200 1ms, count=2"
+    },
+    {
+      "cat": "EXP",
+      "id": "1.4.1",
+      "name": "添加支出",
+      "status": "PASS",
+      "detail": "201 2ms"
+    },
+    {
+      "cat": "EXP",
+      "id": "1.4.2",
+      "name": "支出列表+合计",
+      "status": "PASS",
+      "detail": "200 1ms, total=1500"
+    },
+    {
+      "cat": "EXP",
+      "id": "1.4.3",
+      "name": "编辑支出金额",
+      "status": "PASS",
+      "detail": "200 2ms"
+    },
+    {
+      "cat": "EXP",
+      "id": "1.4.4",
+      "name": "删除支出",
+      "status": "PASS",
+      "detail": "200 2ms"
+    },
+    {
+      "cat": "EXP",
+      "id": "1.4.5",
+      "name": "添加支出(缺category)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "BATCH",
+      "id": "1.5.1",
+      "name": "批量操作(无效action)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "BATCH",
+      "id": "1.5.2",
+      "name": "批量操作(空ids)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "BATCH",
+      "id": "1.5.3",
+      "name": "批量更新截止日期(缺deadline)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "NOTIF",
+      "id": "1.6.1",
+      "name": "通知列表",
+      "status": "PASS",
+      "detail": "200 3ms"
+    },
+    {
+      "cat": "NOTIF",
+      "id": "1.6.2",
+      "name": "全部已读",
+      "status": "PASS",
+      "detail": "200 1ms"
+    },
+    {
+      "cat": "WS",
+      "id": "1.7.1",
+      "name": "获取工作空间",
+      "status": "PASS",
+      "detail": "200 2ms"
+    },
+    {
+      "cat": "WS",
+      "id": "1.7.2",
+      "name": "成员列表",
+      "status": "PASS",
+      "detail": "200 2ms, count=5"
+    },
+    {
+      "cat": "DASH",
+      "id": "1.8.1",
+      "name": "战情室首页",
+      "status": "PASS",
+      "detail": "200 3ms"
+    },
+    {
+      "cat": "DASH",
+      "id": "1.8.2",
+      "name": "战情室导出Excel",
+      "status": "PASS",
+      "detail": "200 257ms, size=10886b"
+    },
+    {
+      "cat": "DASH",
+      "id": "1.8.3",
+      "name": "战情室导出PDF",
+      "status": "PASS",
+      "detail": "200 28ms, size=5079b"
+    },
+    {
+      "cat": "SQLI",
+      "id": "2.1.1",
+      "name": "SQL注入(' OR '1'='1)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "SQLI",
+      "id": "2.1.2",
+      "name": "SQL注入('; DROP TABLE users; --)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "SQLI",
+      "id": "2.1.3",
+      "name": "SQL注入(1' UNION SELECT * FROM users -)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "SQLI",
+      "id": "2.1.4",
+      "name": "SQL注入(' OR 1=1 --)",
+      "status": "PASS",
+      "detail": "400 2ms"
+    },
+    {
+      "cat": "XSS",
+      "id": "2.2.1",
+      "name": "XSS注入(<script>alert(1)</script>)",
+      "status": "PASS",
+      "detail": "201 3ms"
+    },
+    {
+      "cat": "XSS",
+      "id": "2.2.2",
+      "name": "XSS注入(<img src=x onerror=alert(1)>)",
+      "status": "PASS",
+      "detail": "201 2ms"
+    },
+    {
+      "cat": "XSS",
+      "id": "2.2.3",
+      "name": "XSS注入(javascript:alert(1))",
+      "status": "PASS",
+      "detail": "201 2ms"
+    },
+    {
+      "cat": "XSS",
+      "id": "2.2.4",
+      "name": "XSS注入(<svg onload=alert(1)>)",
+      "status": "PASS",
+      "detail": "201 2ms"
+    },
+    {
+      "cat": "CHAR",
+      "id": "2.3.1",
+      "name": "特殊字符(NULL字符)",
+      "status": "PASS",
+      "detail": "201 2ms"
+    },
+    {
+      "cat": "CHAR",
+      "id": "2.3.2",
+      "name": "特殊字符(控制字符)",
+      "status": "PASS",
+      "detail": "201 2ms"
+    },
+    {
+      "cat": "CHAR",
+      "id": "2.3.3",
+      "name": "特殊字符(Emoji)",
+      "status": "PASS",
+      "detail": "201 9ms"
+    },
+    {
+      "cat": "CHAR",
+      "id": "2.3.4",
+      "name": "特殊字符(特殊符号)",
+      "status": "PASS",
+      "detail": "201 2ms"
+    },
+    {
+      "cat": "LONG",
+      "id": "2.4.1",
+      "name": "超长名称(10000字符)",
+      "status": "PASS",
+      "detail": "400 1ms"
+    },
+    {
+      "cat": "TYPE",
+      "id": "2.5.1",
+      "name": "参数类型错误",
+      "status": "PASS",
+      "detail": "201 2ms"
+    },
+    {
+      "cat": "STRUCT",
+      "id": "2.6.1",
+      "name": "响应含data字段",
+      "status": "PASS",
+      "detail": "200 1ms"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.1.1",
+      "name": "未登录GET /projects",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.1.2",
+      "name": "未登录GET /dashboard",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.1.3",
+      "name": "未登录GET /my-tasks",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.1.4",
+      "name": "未登录GET /notifications",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.1.5",
+      "name": "未登录GET /workspaces/mine",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.1.6",
+      "name": "未登录POST /projects",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.1.7",
+      "name": "未登录PUT /comment-cards/any-id/status",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.2.1",
+      "name": "Editor尝试邀请成员",
+      "status": "PASS",
+      "detail": "403"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.2.2",
+      "name": "Editor尝试删除成员",
+      "status": "PASS",
+      "detail": "403"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.2.3",
+      "name": "Editor尝试更新工作空间",
+      "status": "PASS",
+      "detail": "403"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.3.1",
+      "name": "Editor访问同工作空间项目",
+      "status": "PASS",
+      "detail": "200"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.4.1",
+      "name": "无效Token",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.4.2",
+      "name": "空Token",
+      "status": "PASS",
+      "detail": "401"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.5.1",
+      "name": "注册-5位密码(应拒绝)",
+      "status": "PASS",
+      "detail": "400"
+    },
+    {
+      "cat": "AUTHZ",
+      "id": "3.6.1",
+      "name": "项目列表不含密码字段",
+      "status": "PASS",
+      "detail": ""
+    },
+    {
+      "cat": "DATA",
+      "id": "4.1.1",
+      "name": "创建的项目存在于DB",
+      "status": "PASS",
+      "detail": "name=FT-已更新, amount=50000.0"
+    },
+    {
+      "cat": "DATA",
+      "id": "4.2.1",
+      "name": "支出记录存在于DB",
+      "status": "PASS",
+      "detail": "count=1"
+    },
+    {
+      "cat": "DATA",
+      "id": "4.3.1",
+      "name": "支付阶段等于合同金额",
+      "status": "PASS",
+      "detail": "total=50000"
+    },
+    {
+      "cat": "ERR",
+      "id": "5.1.1",
+      "name": "不存在的API路径",
+      "status": "PASS",
+      "detail": "404"
+    },
+    {
+      "cat": "ERR",
+      "id": "5.2.1",
+      "name": "无效JSON请求体",
+      "status": "PASS",
+      "detail": "status=400"
+    },
+    {
+      "cat": "ERR",
+      "id": "5.3.1",
+      "name": "5并发创建项目",
+      "status": "PASS",
+      "detail": "success=5/5"
+    },
+    {
+      "cat": "ERR",
+      "id": "5.4.1",
+      "name": "重复删除项目",
+      "status": "PASS",
+      "detail": "404"
+    },
+    {
+      "cat": "PERF",
+      "id": "6.1.1",
+      "name": "GET /projects",
+      "status": "PASS",
+      "detail": "avg=1ms (threshold:500ms)"
+    },
+    {
+      "cat": "PERF",
+      "id": "6.1.2",
+      "name": "GET /dashboard",
+      "status": "PASS",
+      "detail": "avg=2ms (threshold:500ms)"
+    },
+    {
+      "cat": "PERF",
+      "id": "6.1.3",
+      "name": "GET /my-tasks",
+      "status": "PASS",
+      "detail": "avg=1ms (threshold:500ms)"
+    },
+    {
+      "cat": "PERF",
+      "id": "6.1.4",
+      "name": "GET /notifications",
+      "status": "PASS",
+      "detail": "avg=1ms (threshold:500ms)"
+    },
+    {
+      "cat": "PERF",
+      "id": "6.2.1",
+      "name": "DB查询1000条",
+      "status": "PASS",
+      "detail": "1ms"
+    }
+  ],
+  "pass": 78,
+  "fail": 0,
+  "info": 0,
+  "total": 78,
+  "duration": 6.187525033950806
+}

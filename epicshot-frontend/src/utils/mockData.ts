@@ -1,4 +1,4 @@
-import type { User, Workspace, Project, ProductUnit, ImageMedia, Annotation, CommentCard, TimelineNode, ColorCheckReport, ColorCheckItem } from '@/types/models'
+import type { User, Workspace, Project, ProductUnit, ImageMedia, Annotation, CommentCard, TimelineNode, ColorCheckReport } from '@/types/models'
 
 // Helper: encode a string to base64 with Unicode support
 function toBase64(str: string): string {
@@ -210,11 +210,13 @@ export function mockCommentCards(imageId: string, annotations: Annotation[]): Co
     sortOrder: i + 1,
     createdAt: ann.createdAt,
     resolvedBy: i === 0 ? 'mock-user-2' : undefined,
-    resolvedAt: i === 0 ? '2026-06-06T14:00:00Z' : undefined
+    resolvedAt: i === 0 ? '2026-06-06T14:00:00Z' : undefined,
+    disputeCount: 0,
+    disputed: false
   }))
 }
 
-export function mockTimeline(projectId: string): TimelineNode[] {
+export function mockTimeline(_projectId: string): TimelineNode[] {
   return [
     {
       id: 'mock-tl-1',

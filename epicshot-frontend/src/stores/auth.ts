@@ -126,6 +126,7 @@ export const useAuthStore = defineStore('auth', () => {
     fetchUser,
     logout,
     members,
-    injectToken
+    injectToken,
+    loadWorkspace
   }
 })

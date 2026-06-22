@@ -1,13 +1,13 @@
 <template>
   <div class="notification-bell" ref="bellRef">
     <button class="bell-btn" @click="toggle" :class="{ active: showDropdown }">
-      <span class="bell-icon">🔔</span>
+      <Bell :size="20" class="bell-icon" />
       <span v-if="unreadCount > 0" class="bell-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
     </button>
 
     <!-- 8.1 偏好设置齿轮图标 -->
     <button class="bell-gear-btn" @click.stop="showPrefPanel = !showPrefPanel" title="通知偏好">
-      <span>⚙️</span>
+      <Settings :size="16" />
     </button>
 
     <!-- 8.1 通知偏好面板 -->
@@ -41,41 +41,69 @@
     <div v-if="showDropdown" class="notification-dropdown">
       <div class="dropdown-header">
         <span class="dropdown-title">通知 ({{ unreadCount }} 条未读)</span>
-        <button v-if="unreadCount > 0" class="btn-mark-all" @click="markAllRead">全部已读</button>
+        <button class="btn-mark-all-read" @click="markCategoryRead" :disabled="unreadCount === 0">
+          {{ markReadLabel }}
+        </button>
       </div>
 
-      <div class="notification-list" v-if="notifications.length > 0">
+      <!-- INT-03: 分类筛选标签 -->
+      <div class="notif-tabs">
+        <button
+          v-for="tab in notificationTabs"
+          :key="tab.value"
+          class="notif-tab"
+          :class="{ active: activeTab === tab.value }"
+          @click="activeTab = tab.value"
+        >
+          {{ tab.label }}
+        </button>
+      </div>
+
+      <!-- INT-03: 仅显示未读开关 -->
+      <div class="notif-unread-toggle">
+        <label class="toggle-label">
+          <input type="checkbox" v-model="showUnreadOnly" />
+          <span>仅显示未读</span>
+        </label>
+      </div>
+
+      <div class="notification-list" v-if="filteredNotifications.length > 0">
         <div
-          v-for="n in notifications"
+          v-for="n in filteredNotifications"
           :key="n.id"
           class="notification-item"
           :class="{ unread: !n.isRead }"
           @click="handleClick(n)"
         >
-          <div class="notif-icon">{{ typeIcon(n.type) }}</div>
+          <div class="notif-icon">
+            <component :is="typeIconComponentFor(n.type)" :size="16" />
+          </div>
           <div class="notif-body">
             <div class="notif-title">{{ n.title }}</div>
             <!-- 8.3 内容可视化通知 -->
             <div class="notif-content" v-html="enrichContent(n)"></div>
             <div class="notif-time">{{ formatTime(n.createdAt) }}</div>
           </div>
-          <div v-if="!n.isRead" class="notif-dot"></div>
 
           <!-- 8.2 快捷处理按钮 -->
-          <div v-if="n.type === 'modify_request'" class="notif-quick-actions" @click.stop>
+          <div v-if="(n.type as string) === 'modify_request'" class="notif-quick-actions" @click.stop>
             <button
               class="btn-quick-approve"
-              :disabled="quickActionLoading[n.id]"
+              :disabled="!!quickActionLoading[n.id]"
               @click="quickAction(n.id, 'approve')"
+              title="同意驳回"
             >
-              {{ quickActionLoading[n.id] === 'approve' ? '...' : '同意驳回' }}
+              <Check :size="14" />
+              <span>{{ quickActionLoading[n.id] === 'approve' ? '...' : '同意驳回' }}</span>
             </button>
             <button
               class="btn-quick-reject"
-              :disabled="quickActionLoading[n.id]"
+              :disabled="!!quickActionLoading[n.id]"
               @click="quickAction(n.id, 'reject')"
+              title="拒绝"
             >
-              {{ quickActionLoading[n.id] === 'reject' ? '...' : '拒绝' }}
+              <X :size="14" />
+              <span>{{ quickActionLoading[n.id] === 'reject' ? '...' : '拒绝' }}</span>
             </button>
           </div>
         </div>
@@ -100,17 +128,43 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { dashboardApi } from '@/api/dashboard'
 import client from '@/api/client'
+import { Bell, Settings, MessageCircle, AlertTriangle, Clock, MapPin, UserPlus, ClipboardList, CheckCircle, Edit3, Check, X } from 'lucide-vue-next'
 import type { Notification } from '@/types/models'
+
+const emit = defineEmits<{
+  (e: 'markAllRead'): void
+}>()
 
 const router = useRouter()
 const showDropdown = ref(false)
 const unreadCount = ref(0)
 const notifications = ref<Notification[]>([])
 const bellRef = ref<HTMLElement | null>(null)
+
+// INT-03: 分类筛选
+const activeTab = ref('')
+const showUnreadOnly = ref(false)
+const notificationTabs = [
+  { label: '全部', value: '' },
+  { label: '修改请求', value: 'modify_request' },
+  { label: '系统通知', value: 'system' },
+  { label: '催稿提醒', value: 'reminder' },
+]
+
+const filteredNotifications = computed(() => {
+  let list = notifications.value
+  if (activeTab.value) {
+    list = list.filter(n => n.type === activeTab.value)
+  }
+  if (showUnreadOnly.value) {
+    list = list.filter(n => !n.isRead)
+  }
+  return list
+})
 
 // 8.1 偏好设置
 const showPrefPanel = ref(false)
@@ -156,13 +210,19 @@ const prefSections = [
 const quickActionLoading = ref<Record<string, string>>({})
 const confirmQuickAction = ref<{ id: string; action: string } | null>(null)
 
-function typeIcon(type: string): string {
-  const icons: Record<string, string> = {
-    annotation: '💬', dispute: '⚠️', deadline: '⏰',
-    status_change: '📌', mention: '👋', assign: '📋', confirm_request: '✅',
-    modify_request: '✏️',
-  }
-  return icons[type] || '📌'
+const typeIconComponent = {
+  annotation: MessageCircle,
+  dispute: AlertTriangle,
+  deadline: Clock,
+  status_change: MapPin,
+  mention: UserPlus,
+  assign: ClipboardList,
+  confirm_request: CheckCircle,
+  modify_request: Edit3,
+} as const
+
+function typeIconComponentFor(type: string) {
+  return typeIconComponent[type as keyof typeof typeIconComponent] || MapPin
 }
 
 function formatTime(iso: string): string {
@@ -177,7 +237,13 @@ function formatTime(iso: string): string {
 
 // 8.3 内容可视化：解析通知内容，提取上下文信息
 function enrichContent(n: Notification): string {
+  // Escape HTML first to prevent XSS, then apply safe highlights
   let content = n.content
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
   // 高亮图片索引和批注内容
   content = content.replace(/【图(\d+)】/g, '<strong class="notif-highlight-img">【图$1】</strong>')
   // 高亮：后面的内容
@@ -206,6 +272,29 @@ async function markAllRead() {
   await dashboardApi.markAllNotificationsRead()
   notifications.value.forEach(n => n.isRead = true)
   unreadCount.value = 0
+  emit('markAllRead')
+}
+
+// UX-29: 按分类批量已读
+const markReadLabel = computed(() => {
+  if (!activeTab.value) return '全部已读'
+  const tab = notificationTabs.find(t => t.value === activeTab.value)
+  return tab ? tab.label + '全部已读' : '全部已读'
+})
+
+async function markCategoryRead() {
+  if (activeTab.value) {
+    // 按分类批量已读
+    const categoryNotifications = filteredNotifications.value.filter(n => !n.isRead)
+    for (const n of categoryNotifications) {
+      await dashboardApi.markNotificationRead(n.id)
+      n.isRead = true
+    }
+    unreadCount.value = Math.max(0, unreadCount.value - categoryNotifications.length)
+    emit('markAllRead')
+  } else {
+    await markAllRead()
+  }
 }
 
 async function loadNotifications() {
@@ -333,6 +422,10 @@ onUnmounted(() => {
   right: -28px;
   width: 24px;
   height: 24px;
+  padding: 10px; // DS-15: 触摸热区 44px
+  margin: -10px;
+  background-clip: content-box;
+  box-sizing: content-box;
   font-size: 12px;
   color: $color-text-muted;
   border-radius: 50%;
@@ -485,10 +578,17 @@ onUnmounted(() => {
   color: $color-text;
 }
 
-.btn-mark-all {
+.btn-mark-all-read {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
   font-size: 12px;
-  color: $color-primary;
-  &:hover { text-decoration: underline; }
+  color: #666;
+  cursor: pointer;
+  white-space: nowrap;
+  &:hover:not(:disabled) { background: #f5f5f5; border-color: #ccc; }
+  &:disabled { opacity: 0.4; cursor: default; }
 }
 
 .notification-list {
@@ -506,13 +606,17 @@ onUnmounted(() => {
   flex-wrap: wrap;
 
   &:hover { background: $color-surface-hover; }
-  &.unread { background: rgba($color-primary, 0.04); }
+  // INT-03: 未读通知使用蓝色左边框
+  &.unread {
+    border-left: 3px solid #1a73e8;
+    background: rgba($color-primary, 0.04);
+  }
 }
 
 .notif-icon {
-  font-size: 18px;
   flex-shrink: 0;
   margin-top: 2px;
+  color: $color-text-secondary;
 }
 
 .notif-body {
@@ -563,20 +667,54 @@ onUnmounted(() => {
   margin-top: 4px;
 }
 
-.notif-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: $color-primary;
-  flex-shrink: 0;
-  margin-top: 4px;
-}
-
 .notification-empty {
   padding: 40px 0;
   text-align: center;
   color: $color-text-muted;
   font-size: 13px;
+}
+
+// INT-03: 分类筛选标签
+.notif-tabs {
+  display: flex;
+  gap: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid $color-border-light;
+  flex-shrink: 0;
+}
+
+.notif-tab {
+  flex: 1;
+  padding: 6px 0;
+  font-size: 12px;
+  color: $color-text-secondary;
+  text-align: center;
+  border-radius: $radius-sm;
+  transition: all 0.15s;
+
+  &:hover { color: $color-text; }
+  &.active {
+    background: rgba($color-primary, 0.08);
+    color: $color-primary;
+    font-weight: 500;
+  }
+}
+
+// INT-03: 仅显示未读开关
+.notif-unread-toggle {
+  padding: 6px 16px;
+  border-bottom: 1px solid $color-border-light;
+  flex-shrink: 0;
+
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: $color-text-secondary;
+    cursor: pointer;
+    user-select: none;
+  }
 }
 
 // 8.2 快捷操作按钮
@@ -591,27 +729,37 @@ onUnmounted(() => {
 
 .btn-quick-approve {
   flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   padding: 5px 0;
   font-size: 12px;
   font-weight: 500;
-  color: $color-success;
-  border: 1px solid $color-success;
+  color: #fff;
+  background: #34a853;
+  border: 1px solid #34a853;
   border-radius: $radius-sm;
   transition: all 0.15s;
-  &:hover:not(:disabled) { background: rgba($color-success, 0.08); }
+  &:hover:not(:disabled) { background: #2d9249; }
   &:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .btn-quick-reject {
   flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   padding: 5px 0;
   font-size: 12px;
   font-weight: 500;
-  color: $color-error;
-  border: 1px solid $color-error;
+  color: #fff;
+  background: #9aa0a6;
+  border: 1px solid #9aa0a6;
   border-radius: $radius-sm;
   transition: all 0.15s;
-  &:hover:not(:disabled) { background: rgba($color-error, 0.08); }
+  &:hover:not(:disabled) { background: #80868b; }
   &:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 

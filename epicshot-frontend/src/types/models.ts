@@ -51,6 +51,7 @@ export interface Project {
   shareToken?: string
   shareExpiry?: string
   thumbnailUrl?: string
+  contractAmount?: number
   pendingCount: number
   recentActivity: string
   createdAt: string
@@ -89,7 +90,7 @@ export interface ImageMedia {
 }
 
 // ============ 标注 (Canvas批注) ============
-export type AnnotationToolType = 'pen' | 'arrow' | 'rectangle' | 'ellipse' | 'text' | 'eraser'
+export type AnnotationToolType = 'pointer' | 'pen' | 'arrow' | 'rectangle' | 'ellipse' | 'text' | 'eraser'
 export type AnnotationColor = '#FF0000' | '#FFCC00' | '#0066FF' | '#FFFFFF'
 export type PenWidth = 3 | 5 | 10
 export type ArrowWidth = 3 | 5
@@ -141,6 +142,8 @@ export interface CommentCard {
   status: CardStatus
   sortOrder: number
   thumbnailUrl?: string
+  originalImageUrl?: string
+  processedImageUrl?: string
   resolvedBy?: string
   resolvedAt?: string
   assigneeId?: string
@@ -150,6 +153,8 @@ export interface CommentCard {
   lastEditedBy?: string
   lastEditedAt?: string
   createdAt: string
+  positionX?: number | null
+  positionY?: number | null
 }
 
 // ============ 图片讨论 ============
@@ -259,6 +264,7 @@ export interface ColorCheckItem {
   deviationType: 'color_temp' | 'brightness' | 'contrast'
   deviationValue: number
   suggestion: string
+  taskCreated?: boolean
 }
 
 export interface ColorCheckReport {
@@ -371,6 +377,15 @@ export interface MemberLoad {
   avatarUrl: string
   role: string
   taskCount: number
+  tasks?: MemberTask[]
+}
+
+export interface MemberTask {
+  id: string
+  projectName: string
+  type: string
+  deadline: string
+  urgent: boolean
 }
 
 export interface DashboardStats {
@@ -430,6 +445,7 @@ export interface MyTask {
   disputed: boolean
   projectName: string
   projectId: string
+  unitName?: string
   thumbnailUrl: string
   priority: TaskPriority
   estimatedTime?: number

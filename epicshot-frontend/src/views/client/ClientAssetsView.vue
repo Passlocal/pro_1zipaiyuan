@@ -1,6 +1,12 @@
 <template>
   <div class="client-assets">
-    <h1 class="page-title">我的项目</h1>
+    <!-- F-52: 品牌栏 -->
+    <div class="brand-bar" v-if="brand.name" :style="{ '--brand-color': brand.themeColor }">
+      <img v-if="brand.logoUrl" :src="brand.logoUrl" :alt="brand.name" class="brand-logo" />
+      <span class="brand-name">{{ brand.name }}</span>
+    </div>
+
+    <h1 class="page-title">已完成项目</h1>
 
     <!-- 加载中 -->
     <div v-if="loading" class="loading-state">
@@ -75,11 +81,24 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import { projectApi } from '@/api/projects'
+import client from '@/api/client'
 import type { Project, ImageMedia } from '@/types/models'
 
+const route = useRoute()
 const projects = ref<Project[]>([])
 const loading = ref(true)
+const brand = ref({ name: '', logoUrl: '', themeColor: '#0066FF' })
+
+async function fetchBrand() {
+  const token = route.query.token as string
+  if (!token) return
+  try {
+    const res = await client.get(`/v1/share/${token}/brand`)
+    if (res.data?.data) brand.value = res.data.data
+  } catch { /* use defaults */ }
+}
 
 const selectedProject = ref<Project | null>(null)
 const projectImages = ref<ImageMedia[]>([])
@@ -104,9 +123,26 @@ async function loadProjects() {
   }
 }
 
-function openProject(proj: Project) {
+async function openProject(proj: Project) {
   selectedProject.value = proj
   projectImages.value = []
+  // Load images for the selected project
+  try {
+    const unitsRes = await projectApi.getProductUnits(proj.id)
+    const units = (unitsRes.data as any).data || []
+    if (units.length > 0) {
+      const imagePromises = units.map((u: any) => projectApi.getImages(u.id))
+      const imageResults = await Promise.all(imagePromises)
+      const allImages: ImageMedia[] = []
+      imageResults.forEach((res: any) => {
+        const imgs = res.data?.data || []
+        allImages.push(...imgs)
+      })
+      projectImages.value = allImages
+    }
+  } catch {
+    // ignore, show empty state
+  }
 }
 
 function closeModal() {
@@ -135,6 +171,7 @@ async function requestOriginal() {
 }
 
 onMounted(() => {
+  fetchBrand()
   loadProjects()
 })
 </script>
@@ -146,6 +183,26 @@ onMounted(() => {
   padding: 24px 32px;
   height: 100%;
   overflow-y: auto;
+}
+
+// F-52: 品牌栏
+.brand-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 10px;
+  border-bottom: 2px solid var(--brand-color, #0066FF);
+  margin-bottom: 16px;
+}
+.brand-logo {
+  height: 24px;
+  max-width: 100px;
+  object-fit: contain;
+}
+.brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: $color-text;
 }
 
 .page-title {
@@ -398,6 +455,40 @@ onMounted(() => {
   &:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+}
+
+@media (max-width: 768px) {
+  .client-assets {
+    padding: 16px;
+  }
+
+  .page-title {
+    font-size: 20px;
+  }
+
+  .assets-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+  }
+
+  .asset-card {
+    border-radius: $radius-md;
+  }
+
+  .modal-content {
+    width: 94vw;
+    max-height: 85vh;
+  }
+
+  .image-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    padding: 12px;
+  }
+
+  button, .btn {
+    min-height: 44px;
   }
 }
 </style>

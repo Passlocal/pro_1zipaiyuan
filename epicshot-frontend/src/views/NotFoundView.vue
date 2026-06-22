@@ -99,4 +99,38 @@
     }
   }
 }
+
+@media (max-width: 768px) {
+  .not-found {
+    padding: 16px;
+    align-items: flex-start;
+    padding-top: 60px;
+  }
+
+  .not-found-code {
+    font-size: 64px;
+  }
+
+  .not-found-subtitle {
+    font-size: 18px;
+  }
+
+  .not-found-desc {
+    font-size: 14px;
+  }
+
+  .not-found-actions {
+    flex-direction: column;
+    gap: 8px;
+    align-items: stretch;
+  }
+
+  .not-found-link {
+    text-align: center;
+    min-height: 48px;
+    line-height: 28px;
+    font-size: 16px;
+    padding: 10px 20px;
+  }
+}
 </style>

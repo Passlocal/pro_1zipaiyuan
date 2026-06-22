@@ -1,7 +1,14 @@
 <template>
   <div class="portfolio-editor">
     <div class="editor-header">
-      <h1 class="page-title">作品集编辑</h1>
+      <!-- NAV-02: 面包屑导航 -->
+      <nav class="breadcrumb-nav">
+        <router-link to="/projects" class="breadcrumb-link">项目看板</router-link>
+        <span class="breadcrumb-sep">›</span>
+        <router-link :to="`/project/${projectId}`" class="breadcrumb-link">项目详情</router-link>
+        <span class="breadcrumb-sep">›</span>
+        <span class="breadcrumb-current">作品集编辑</span>
+      </nav>
       <div class="header-actions">
         <button
           class="btn-generate"
@@ -12,6 +19,59 @@
           <span v-else>✨ 生成作品集</span>
         </button>
       </div>
+    </div>
+
+    <!-- UX-40: 封面设置 -->
+    <div class="cover-settings">
+      <h3 class="cover-settings-title">封面设置</h3>
+      <div class="cover-settings-row">
+        <div class="cover-settings-field">
+          <label class="cover-settings-label">标题</label>
+          <input
+            v-model="portfolioSettings.coverTitle"
+            type="text"
+            class="form-input"
+            placeholder="输入封面标题"
+          />
+        </div>
+        <div class="cover-settings-field">
+          <label class="cover-settings-label">字体大小</label>
+          <select v-model.number="portfolioSettings.titleFontSize" class="form-input">
+            <option v-for="s in [12,14,16,18,20,24]" :key="s" :value="s">{{ s }}px</option>
+          </select>
+        </div>
+        <div class="cover-settings-field">
+          <label class="cover-settings-label">标题颜色</label>
+          <input
+            v-model="portfolioSettings.titleColor"
+            type="color"
+            class="form-color-input"
+          />
+        </div>
+        <div class="cover-settings-field">
+          <label class="cover-settings-label">Logo</label>
+          <label class="btn-upload-logo">
+            <input type="file" accept="image/*" @change="handleLogoUpload" hidden />
+            {{ portfolioSettings.logoUrl ? '更换Logo' : '上传Logo' }}
+          </label>
+          <img v-if="portfolioSettings.logoUrl" :src="portfolioSettings.logoUrl" class="logo-preview" />
+        </div>
+      </div>
+    </div>
+
+    <!-- UX-22: 布局模板选择器 -->
+    <div class="template-selector">
+      <span class="template-label">布局模板：</span>
+      <button
+        v-for="tpl in templates"
+        :key="tpl.id"
+        class="btn-template"
+        :class="{ active: activeTemplate === tpl.id }"
+        @click="activeTemplate = tpl.id"
+      >
+        <span class="tpl-icon">{{ tpl.icon }}</span>
+        <span class="tpl-name">{{ tpl.name }}</span>
+      </button>
     </div>
 
     <!-- 生成进度 -->
@@ -28,7 +88,7 @@
     <!-- 预览区：H5 手机框架 -->
     <div class="editor-body">
       <div class="preview-area">
-        <div class="phone-frame">
+        <div class="phone-frame" :style="phoneFrameStyle">
           <div class="phone-screen">
             <!-- 封面 -->
             <div class="cover-section">
@@ -39,7 +99,7 @@
             </div>
 
             <!-- 图片列表 -->
-            <div class="image-list">
+            <div class="image-list" :class="'layout-' + activeTemplateConfig.layout">
               <div
                 v-for="(img, idx) in portfolioImages"
                 :key="idx"
@@ -148,6 +208,27 @@ const generating = ref(false)
 const saving = ref(false)
 const publishing = ref(false)
 
+// UX-55: 作品集多模板
+const templates = [
+  { id: 'magazine', name: '杂志风', icon: '📰', config: { layout: 'masonry', gap: 12, bgColor: '#1a1a1a', fontFamily: 'serif', accentColor: '#e63946', textColor: '#ffffff' } },
+  { id: 'ecommerce', name: '电商风', icon: '🛍️', config: { layout: 'grid', gap: 16, bgColor: '#ffffff', fontFamily: 'sans-serif', accentColor: '#ff6600', textColor: '#333333' } },
+  { id: 'minimal', name: '极简风', icon: '⬜', config: { layout: 'single', gap: 24, bgColor: '#fafafa', fontFamily: 'sans-serif', accentColor: '#333333', textColor: '#666666' } },
+  { id: 'wedding', name: '婚礼风', icon: '💐', config: { layout: 'grid', gap: 8, bgColor: '#fdf6f0', fontFamily: 'cursive', accentColor: '#c9a96e', textColor: '#8b7355' } },
+]
+const activeTemplate = ref('magazine')
+
+const activeTemplateConfig = computed(() => {
+  return templates.find(t => t.id === activeTemplate.value)?.config || templates[0].config
+})
+
+const phoneFrameStyle = computed(() => ({
+  '--tpl-bg-color': activeTemplateConfig.value.bgColor,
+  '--tpl-font-family': activeTemplateConfig.value.fontFamily,
+  '--tpl-accent-color': activeTemplateConfig.value.accentColor,
+  '--tpl-text-color': activeTemplateConfig.value.textColor,
+  '--tpl-gap': activeTemplateConfig.value.gap + 'px',
+}))
+
 const portfolioId = ref('')
 const portfolio = ref<any>(null)
 const clientName = ref('')
@@ -157,6 +238,23 @@ const portfolioImages = ref<PortfolioImage[]>([])
 const coverBgFile = ref<File | null>(null)
 const coverBgPreview = ref('')
 const bgInputRef = ref<HTMLInputElement | null>(null)
+
+// UX-40: 封面设置
+const portfolioSettings = ref({
+  coverTitle: '',
+  titleFontSize: 18,
+  titleColor: '#ffffff',
+  logoUrl: '',
+  logoFile: null as File | null,
+})
+
+function handleLogoUpload(e: Event) {
+  const input = e.target as HTMLInputElement
+  if (input.files?.[0]) {
+    portfolioSettings.value.logoFile = input.files[0]
+    portfolioSettings.value.logoUrl = URL.createObjectURL(input.files[0])
+  }
+}
 
 const workspaceLogo = computed(() => authStore.workspace?.logoUrl || '')
 
@@ -205,7 +303,7 @@ function onDrop(idx: number) {
 async function generatePortfolio() {
   generating.value = true
   try {
-    const res = await portfolioApi.generate(projectId.value)
+    await portfolioApi.generate(projectId.value)
     const portfolioRes = await portfolioApi.get(projectId.value)
     const p = portfolioRes.data.data
     portfolio.value = p
@@ -333,6 +431,114 @@ onMounted(() => {
   }
 }
 
+// UX-22: 模板选择器
+.template-selector {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 0;
+  margin-bottom: 16px;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+// UX-40: 封面设置
+.cover-settings {
+  padding: 16px 24px;
+  border-bottom: 1px solid $color-border;
+  background: $color-surface;
+  flex-shrink: 0;
+}
+
+.cover-settings-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: $color-text;
+  margin-bottom: 12px;
+}
+
+.cover-settings-row {
+  display: flex;
+  gap: 16px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.cover-settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cover-settings-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: $color-text-secondary;
+}
+
+.form-color-input {
+  width: 40px;
+  height: 36px;
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  padding: 2px;
+  cursor: pointer;
+  background: #fff;
+}
+
+.btn-upload-logo {
+  display: inline-block;
+  padding: 6px 12px;
+  background: #f0f7ff;
+  color: #1a73e8;
+  border: 1px dashed #1a73e8;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  &:hover { background: #e3f0ff; }
+}
+
+.logo-preview {
+  width: 32px;
+  height: 32px;
+  border-radius: 4px;
+  object-fit: cover;
+  border: 1px solid $color-border;
+  margin-top: 4px;
+}
+
+.template-label {
+  font-size: 13px;
+  color: #666;
+  flex-shrink: 0;
+}
+
+.btn-template {
+  padding: 4px 12px;
+  background: #f5f5f5;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  color: #666;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  &:hover { background: #e8e8e8; }
+  &.active {
+    background: #e8f0fe;
+    color: #1a73e8;
+    border-color: #1a73e8;
+  }
+}
+
+.tpl-icon {
+  margin-right: 2px;
+  font-size: 14px;
+}
+.tpl-name {
+  font-size: 12px;
+}
+
 // 生成进度
 .generating-overlay {
   position: absolute;
@@ -413,6 +619,12 @@ onMounted(() => {
   overflow: hidden;
   background: $color-surface;
   box-shadow: $shadow-lg;
+
+  --tpl-bg-color: #1a1a1a;
+  --tpl-font-family: serif;
+  --tpl-accent-color: #e63946;
+  --tpl-text-color: #ffffff;
+  --tpl-gap: 12px;
 }
 
 .phone-screen {
@@ -432,6 +644,8 @@ onMounted(() => {
   gap: 8px;
   color: #fff;
   z-index: 0;
+  background: var(--tpl-bg-color);
+  font-family: var(--tpl-font-family);
 
   .cover-bg {
     position: absolute;
@@ -467,6 +681,7 @@ onMounted(() => {
     font-size: 18px;
     font-weight: 600;
     text-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+    color: var(--tpl-text-color);
   }
 }
 
@@ -474,11 +689,27 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   padding: 8px;
-  gap: 8px;
+  gap: var(--tpl-gap);
+  background: var(--tpl-bg-color);
+}
+
+.image-list.layout-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.image-list.layout-masonry {
+  columns: 2;
+  column-gap: var(--tpl-gap);
+}
+
+.image-list.layout-single {
+  display: flex;
+  flex-direction: column;
 }
 
 .image-item {
-  border: 1px solid $color-border-light;
+  border: 1px solid var(--tpl-accent-color, $color-border-light);
   border-radius: $radius-md;
   overflow: hidden;
 
@@ -704,6 +935,76 @@ onMounted(() => {
   &:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+}
+
+@media (max-width: 768px) {
+  .editor-header {
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px 16px;
+  }
+
+  .header-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .cover-settings {
+    padding: 12px 16px;
+  }
+
+  .cover-settings-row {
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .editor-body {
+    flex-direction: column;
+  }
+
+  .preview-area {
+    padding: 16px;
+    overflow: auto;
+  }
+
+  .phone-frame {
+    width: 280px;
+    height: 520px;
+    border-width: 6px;
+    border-radius: 24px;
+    flex-shrink: 0;
+  }
+
+  .sidebar-tools {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid $color-border;
+    padding: 12px 16px;
+    max-height: 200px;
+  }
+
+  .editor-footer {
+    padding: 0 16px;
+    gap: 8px;
+  }
+
+  .btn-save,
+  .btn-publish,
+  .btn-generate {
+    min-height: 44px;
+    font-size: 15px;
+  }
+
+  .form-input {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  .btn-template {
+    min-height: 44px;
+    padding: 8px 14px;
+    font-size: 14px;
   }
 }
 </style>

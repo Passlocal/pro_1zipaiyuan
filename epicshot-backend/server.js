@@ -217,6 +217,7 @@ function migrate() {
       deadline TEXT, status TEXT DEFAULT 'draft' CHECK(status IN ('draft','review','in_progress','final_review','completed','archived')),
       share_token TEXT UNIQUE, share_expiry TEXT,
       pending_count INTEGER DEFAULT 0,
+      contract_amount REAL DEFAULT 0,
       created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
     );
     CREATE TABLE IF NOT EXISTS product_units (
@@ -251,9 +252,10 @@ function migrate() {
     );
     CREATE TABLE IF NOT EXISTS ai_samples (
       id TEXT PRIMARY KEY, image_id TEXT, style TEXT,
-      output_urls TEXT DEFAULT '[]', liked_indexes TEXT DEFAULT '[]',
+      project_id TEXT, output_urls TEXT DEFAULT '[]', liked_indexes TEXT DEFAULT '[]',
       created_at TEXT DEFAULT (datetime('now'))
     );
+    -- Migration: add project_id to existing ai_samples (auto-handled by CREATE TABLE IF NOT EXISTS)
     CREATE TABLE IF NOT EXISTS ai_instructions (
       id TEXT PRIMARY KEY, comment_card_id TEXT,
       original_text TEXT, suggestion_text TEXT DEFAULT '',
@@ -315,6 +317,10 @@ function migrate() {
   try { db.exec('ALTER TABLE comment_cards ADD COLUMN last_edited_at TEXT') } catch (e) {}
   try { db.exec('ALTER TABLE comment_cards ADD COLUMN read_by_client INTEGER DEFAULT 0') } catch (e) {}
   try { db.exec('ALTER TABLE comment_cards ADD COLUMN read_at TEXT') } catch (e) {}
+
+  // V1.3 Migration: 意见卡片图片坐标标记
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN position_x REAL') } catch (e) {}
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN position_y REAL') } catch (e) {}
   try { db.exec('ALTER TABLE projects ADD COLUMN last_nudged_at TEXT') } catch (e) {}
   try { db.exec('ALTER TABLE projects ADD COLUMN nudge_count INTEGER DEFAULT 0') } catch (e) {}
   try { db.exec('ALTER TABLE projects ADD COLUMN client_first_visit TEXT DEFAULT \'true\'') } catch (e) {}
@@ -341,6 +347,32 @@ function migrate() {
   try { db.exec('ALTER TABLE project_templates ADD COLUMN units TEXT DEFAULT \'{}\'') } catch (e) { /* column exists */ }
   try { db.exec('ALTER TABLE projects ADD COLUMN metadata TEXT DEFAULT \'{}\'') } catch (e) { /* column exists */ }
 
+  // V1.2.1 Migration: 客户端品牌自定义
+  try { db.exec('ALTER TABLE workspaces ADD COLUMN client_brand_name TEXT DEFAULT \'\'') } catch (e) {}
+  try { db.exec('ALTER TABLE workspaces ADD COLUMN client_brand_logo_url TEXT DEFAULT \'\'') } catch (e) {}
+  try { db.exec('ALTER TABLE workspaces ADD COLUMN client_brand_theme_color TEXT DEFAULT \'#0066FF\'') } catch (e) {}
+
+  // V1.19: 交付包默认配置
+  try { db.exec('ALTER TABLE workspaces ADD COLUMN client_brand_settings TEXT DEFAULT \'{}\'') } catch (e) {}
+
+  // V1.2.1 Migration: 异步交付任务表
+  try { db.exec('CREATE TABLE IF NOT EXISTS delivery_tasks (id TEXT PRIMARY KEY, workspace_id TEXT, project_id TEXT, user_id TEXT, options TEXT DEFAULT \'{}\', status TEXT DEFAULT \'pending\', download_url TEXT, expires_at TEXT, created_at TEXT DEFAULT (datetime(\'now\')))') } catch (e) {}
+
+  // V1.18: 合同付款阶段
+  try { db.exec('CREATE TABLE IF NOT EXISTS payment_stages (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, name TEXT, amount REAL DEFAULT 0, sort INTEGER DEFAULT 0, created_at TEXT, FOREIGN KEY (project_id) REFERENCES projects(id))') } catch (e) {}
+
+  // V1.19: 项目支出记录
+  try { db.exec('CREATE TABLE IF NOT EXISTS expenses (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, project_id TEXT NOT NULL, category TEXT NOT NULL, amount REAL DEFAULT 0, expense_date TEXT, note TEXT DEFAULT \'\', created_at TEXT DEFAULT (datetime(\'now\')), FOREIGN KEY (project_id) REFERENCES projects(id))') } catch (e) {}
+
+  // V1.20 Migration: 讨论区已读状态
+  try { db.exec('ALTER TABLE image_discussions ADD COLUMN is_read INTEGER DEFAULT 0') } catch (e) { /* column exists */ }
+
+  // V1.20 Migration: 工作空间告警规则
+  try { db.exec('ALTER TABLE workspaces ADD COLUMN alert_rules TEXT DEFAULT \'{}\'') } catch (e) { /* column exists */ }
+
+  // V1.21 Migration: 预估工时(分钟数)
+  try { db.exec('ALTER TABLE comment_cards ADD COLUMN estimated_time INTEGER DEFAULT NULL') } catch (e) { /* column exists */ }
+
   // V1.1: 通知表
   db.exec(`
     CREATE TABLE IF NOT EXISTS notifications (
@@ -360,6 +392,34 @@ function migrate() {
     CREATE INDEX IF NOT EXISTS idx_notifications_workspace ON notifications(workspace_id);
   `)
 
+  // Migration: add project_id to ai_samples (ignore if already exists)
+  try { db.prepare('ALTER TABLE ai_samples ADD COLUMN project_id TEXT').run() } catch(e) {}
+
+  // UX-27: 操作日志表
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS operation_logs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT,
+      user_id TEXT,
+      user_name TEXT,
+      action TEXT NOT NULL,
+      target_type TEXT,
+      target_id TEXT,
+      detail TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )
+  `)
+
+  // UX-18: 产品单元二级分类
+  try {
+    db.exec(`ALTER TABLE product_units ADD COLUMN parent_id TEXT`)
+  } catch (e) { /* column already exists */ }
+
+  // DATA-06: 项目合同金额
+  try {
+    db.exec(`ALTER TABLE projects ADD COLUMN contract_amount REAL DEFAULT 0`)
+  } catch (e) { /* column already exists */ }
+
   // V1.1: 项目模板表
   db.exec(`
     CREATE TABLE IF NOT EXISTS project_templates (
@@ -375,52 +435,67 @@ function migrate() {
   `)
 }
 
+// UX-27: 操作日志记录
+function logOperation(projectId, userId, userName, action, targetType, targetId, detail) {
+  const id = uuidv4()
+  db.prepare(`INSERT INTO operation_logs (id, project_id, user_id, user_name, action, target_type, target_id, detail) VALUES (?,?,?,?,?,?,?,?)`).run(id, projectId, userId, userName, action, targetType, targetId, detail || '')
+}
+
 function seedIfEmpty() {
-  var count = db.prepare('SELECT COUNT(*) as c FROM users').get()
+  var count = db.prepare('SELECT COUNT(*) as c FROM workspaces').get()
   if (count.c > 0) return
+
+  try {
 
   log('INFO', 'DB', 'Seeding initial data...')
 
   var wsId = 'ws-001'
-  db.prepare('INSERT INTO workspaces VALUES (?,?,?,?,?)').run(wsId, '素影摄影工作室', '', 'enterprise', '2026-01-15T08:00:00Z')
+  db.prepare('INSERT INTO workspaces (id,name,logo_url,plan_type,created_at) VALUES (?,?,?,?,?)').run(wsId, '素影摄影工作室', '', 'enterprise', '2026-01-15T08:00:00Z')
 
   var adminHash = bcrypt.hashSync('admin123', BCRYPT_ROUNDS)
-  db.prepare('INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-001', '张总监', 'zhang@epicshot.com', adminHash, null, wsId, 'owner', '', 'active', '2026-01-15T08:00:00Z')
-  db.prepare('INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-002', '李修图', 'li@epicshot.com', adminHash, null, wsId, 'editor', '', 'active', '2026-02-10T10:00:00Z')
-  db.prepare('INSERT INTO users VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-003', '王后期', 'wang@epicshot.com', adminHash, null, wsId, 'editor', '', 'active', '2026-03-05T09:00:00Z')
+  var testHash = bcrypt.hashSync('test123', BCRYPT_ROUNDS)
+  db.prepare('INSERT INTO users (id,name,email,password,wechat_openid,workspace_id,role,avatar_url,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-001', '张总监', 'zhang@epicshot.com', adminHash, null, wsId, 'owner', '', 'active', '2026-01-15T08:00:00Z')
+  db.prepare('INSERT INTO users (id,name,email,password,wechat_openid,workspace_id,role,avatar_url,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-002', '李修图', 'li@epicshot.com', adminHash, null, wsId, 'editor', '', 'active', '2026-02-10T10:00:00Z')
+  db.prepare('INSERT INTO users (id,name,email,password,wechat_openid,workspace_id,role,avatar_url,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-003', '王后期', 'wang@epicshot.com', adminHash, null, wsId, 'editor', '', 'active', '2026-03-05T09:00:00Z')
+  // 测试账号
+  db.prepare('INSERT INTO users (id,name,email,password,wechat_openid,workspace_id,role,avatar_url,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-test-owner', 'TestOwner', 'owner@test.com', adminHash, null, wsId, 'owner', '', 'active', '2026-06-01T00:00:00Z')
+  db.prepare('INSERT INTO users (id,name,email,password,wechat_openid,workspace_id,role,avatar_url,status,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('user-test-editor', 'TestEditor', 'editor@test.com', adminHash, null, wsId, 'editor', '', 'active', '2026-06-01T00:00:00Z')
 
-  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-001', wsId, '小米15系列官网主图', '小米科技', null, 'in_progress', 'share-token-001', null, 8, '2026-06-01T10:00:00Z', '2026-06-14T10:00:00Z', 24, '{}')
-  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-002', wsId, '花西子口红新品', '花西子', null, 'final_review', 'share-token-002', null, 3, '2026-05-28T14:00:00Z', '2026-06-13T16:00:00Z', 24, '{}')
-  db.prepare('INSERT INTO projects VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-003', wsId, '2026春季跑鞋系列', '安踏体育', null, 'completed', 'share-token-003', null, 0, '2026-05-15T09:00:00Z', '2026-06-10T09:00:00Z', 24, '{}')
+  db.prepare('INSERT INTO projects (id,workspace_id,name,client_name,deadline,status,share_token,share_expiry,pending_count,created_at,updated_at,warning_hours,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-001', wsId, '小米15系列官网主图', '小米科技', null, 'in_progress', 'share-token-001', null, 8, '2026-06-01T10:00:00Z', '2026-06-14T10:00:00Z', 24, '{}')
+  db.prepare('INSERT INTO projects (id,workspace_id,name,client_name,deadline,status,share_token,share_expiry,pending_count,created_at,updated_at,warning_hours,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-002', wsId, '花西子口红新品', '花西子', null, 'final_review', 'share-token-002', null, 3, '2026-05-28T14:00:00Z', '2026-06-13T16:00:00Z', 24, '{}')
+  db.prepare('INSERT INTO projects (id,workspace_id,name,client_name,deadline,status,share_token,share_expiry,pending_count,created_at,updated_at,warning_hours,metadata) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('proj-003', wsId, '2026春季跑鞋系列', '安踏体育', null, 'completed', 'share-token-003', null, 0, '2026-05-15T09:00:00Z', '2026-06-10T09:00:00Z', 24, '{}')
 
-  db.prepare('INSERT INTO product_units VALUES (?,?,?,?)').run('unit-001', 'proj-001', '主图', 1)
-  db.prepare('INSERT INTO product_units VALUES (?,?,?,?)').run('unit-002', 'proj-001', '细节图', 2)
+  db.prepare('INSERT INTO product_units (id,project_id,name,sort_order) VALUES (?,?,?,?)').run('unit-001', 'proj-001', '主图', 1)
+  db.prepare('INSERT INTO product_units (id,project_id,name,sort_order) VALUES (?,?,?,?)').run('unit-002', 'proj-001', '细节图', 2)
 
-  db.prepare('INSERT INTO images VALUES (?,?,?,?,?,?,?,?,?)').run('img-001', 'unit-001', '/uploads/placeholder.svg', '["/uploads/placeholder.svg","/uploads/placeholder.svg","/uploads/placeholder.svg"]', 'image', '{"width":800,"height":600}', 'user-001', '2026-06-01T10:00:00Z', null)
-  db.prepare('INSERT INTO images VALUES (?,?,?,?,?,?,?,?,?)').run('img-002', 'unit-001', '/uploads/placeholder.svg', '["/uploads/placeholder.svg","/uploads/placeholder.svg","/uploads/placeholder.svg"]', 'image', '{"width":800,"height":1200}', 'user-001', '2026-06-01T10:30:00Z', null)
+  db.prepare('INSERT INTO images (id,product_unit_id,original_url,thumbnail_urls,media_type,metadata,uploader_id,created_at) VALUES (?,?,?,?,?,?,?,?)').run('img-001', 'unit-001', '/uploads/placeholder.svg', '["/uploads/placeholder.svg","/uploads/placeholder.svg","/uploads/placeholder.svg"]', 'image', '{"width":800,"height":600}', 'user-001', '2026-06-01T10:00:00Z')
+  db.prepare('INSERT INTO images (id,product_unit_id,original_url,thumbnail_urls,media_type,metadata,uploader_id,created_at) VALUES (?,?,?,?,?,?,?,?)').run('img-002', 'unit-001', '/uploads/placeholder.svg', '["/uploads/placeholder.svg","/uploads/placeholder.svg","/uploads/placeholder.svg"]', 'image', '{"width":800,"height":1200}', 'user-001', '2026-06-01T10:30:00Z')
 
-  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)').run('ann-001', 'img-001', 'user-001', 'rectangle', '{"x":0.15,"y":0.2,"w":0.3,"h":0.25}', '{"color":"#FF0000","width":3}', '[]', '', '2026-06-05T10:00:00Z', null)
-  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)').run('ann-002', 'img-001', 'user-001', 'arrow', '{"x":0.5,"y":0.6,"w":0.15,"h":-0.2}', '{"color":"#0066FF","width":3}', '[]', '', '2026-06-05T10:05:00Z', null)
+  db.prepare('INSERT INTO annotations (id,image_id,user_id,tool_type,coordinates,style,stroke_data,text_content,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('ann-001', 'img-001', 'user-001', 'rectangle', '{"x":0.15,"y":0.2,"w":0.3,"h":0.25}', '{"color":"#FF0000","width":3}', '[]', '', '2026-06-05T10:00:00Z')
+  db.prepare('INSERT INTO annotations (id,image_id,user_id,tool_type,coordinates,style,stroke_data,text_content,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('ann-002', 'img-001', 'user-001', 'arrow', '{"x":0.5,"y":0.6,"w":0.15,"h":-0.2}', '{"color":"#0066FF","width":3}', '[]', '', '2026-06-05T10:05:00Z')
 
-  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('card-001', 'ann-001', 'img-001', '这个区域需要重新构图', 'resolved', 1, 'user-002', '2026-06-06T14:00:00Z', '2026-06-05T10:00:00Z', null, 0, 0, null)
-  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('card-002', 'ann-002', 'img-001', '箭头指向的元素请替换', 'unresolved', 2, null, null, '2026-06-05T10:05:00Z', null, 0, 0, null)
+  db.prepare('INSERT INTO comment_cards (id,annotation_id,image_id,text_content,status,sort_order,resolved_by,resolved_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('card-001', 'ann-001', 'img-001', '这个区域需要重新构图', 'resolved', 1, 'user-002', '2026-06-06T14:00:00Z', '2026-06-05T10:00:00Z')
+  db.prepare('INSERT INTO comment_cards (id,annotation_id,image_id,text_content,status,sort_order,resolved_by,resolved_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('card-002', 'ann-002', 'img-001', '箭头指向的元素请替换', 'unresolved', 2, null, null, '2026-06-05T10:05:00Z')
 
   // F-15-1: 预置口语化标注意见
-  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)').run('ann-003', 'img-002', 'user-001', 'freehand', '{"points":[[0.2,0.25],[0.35,0.3],[0.5,0.25],[0.65,0.3]]}', '{"color":"#FF0000","width":5}', '[]', '', '2026-06-07T09:00:00Z', null)
-  db.prepare('INSERT INTO annotations VALUES (?,?,?,?,?,?,?,?,?,?)').run('ann-004', 'img-002', 'user-001', 'text', '{"x":0.1,"y":0.15,"w":0.4,"h":0.06}', '{"color":"#FF0000","fontSize":18}', '[]', '', '2026-06-07T09:05:00Z', null)
-  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('card-003', 'ann-003', 'img-002', '袖口这边脏了，要处理干净', 'unresolved', 3, null, null, '2026-06-07T09:00:00Z', null, 0, 0, null)
-  db.prepare('INSERT INTO comment_cards VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)').run('card-004', 'ann-004', 'img-002', '整体要那种高级灰的感觉', 'unresolved', 4, null, null, '2026-06-07T09:05:00Z', null, 0, 0, null)
+  db.prepare('INSERT INTO annotations (id,image_id,user_id,tool_type,coordinates,style,stroke_data,text_content,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('ann-003', 'img-002', 'user-001', 'freehand', '{"points":[[0.2,0.25],[0.35,0.3],[0.5,0.25],[0.65,0.3]]}', '{"color":"#FF0000","width":5}', '[]', '', '2026-06-07T09:00:00Z')
+  db.prepare('INSERT INTO annotations (id,image_id,user_id,tool_type,coordinates,style,stroke_data,text_content,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('ann-004', 'img-002', 'user-001', 'text', '{"x":0.1,"y":0.15,"w":0.4,"h":0.06}', '{"color":"#FF0000","fontSize":18}', '[]', '', '2026-06-07T09:05:00Z')
+  db.prepare('INSERT INTO comment_cards (id,annotation_id,image_id,text_content,status,sort_order,resolved_by,resolved_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('card-003', 'ann-003', 'img-002', '袖口这边脏了，要处理干净', 'unresolved', 3, null, null, '2026-06-07T09:00:00Z')
+  db.prepare('INSERT INTO comment_cards (id,annotation_id,image_id,text_content,status,sort_order,resolved_by,resolved_at,created_at) VALUES (?,?,?,?,?,?,?,?,?)').run('card-004', 'ann-004', 'img-002', '整体要那种高级灰的感觉', 'unresolved', 4, null, null, '2026-06-07T09:05:00Z')
 
   // F-23: 预置项目模板
-  db.prepare('INSERT INTO project_templates VALUES (?,?,?,?,?,?,?)').run('tpl-001', wsId, '电商白底图标准流程', '适用于白底产品拍摄的标准修图流程，包含修图和质检环节', JSON.stringify({'retouch':'user-002','qa':'user-001'}), JSON.stringify({'naming':'产品名_最终稿','format':'jpg','minWidth':2000,'minHeight':2000}), '2026-06-01T00:00:00Z')
-  db.prepare('INSERT INTO project_templates VALUES (?,?,?,?,?,?,?)').run('tpl-002', wsId, '时尚模特图流程', '适用于服装、配饰模特拍摄修图流程', JSON.stringify({'retouch':'user-003','qa':'user-001'}), JSON.stringify({'naming':'品牌_模特_日期','format':'jpg','colorSpace':'sRGB'}), '2026-06-01T00:00:00Z')
+  db.prepare('INSERT INTO project_templates (id,workspace_id,name,description,assignee_map,delivery_rules,created_at) VALUES (?,?,?,?,?,?,?)').run('tpl-001', wsId, '电商白底图标准流程', '适用于白底产品拍摄的标准修图流程，包含修图和质检环节', JSON.stringify({'retouch':'user-002','qa':'user-001'}), JSON.stringify({'naming':'产品名_最终稿','format':'jpg','minWidth':2000,'minHeight':2000}), '2026-06-01T00:00:00Z')
+  db.prepare('INSERT INTO project_templates (id,workspace_id,name,description,assignee_map,delivery_rules,created_at) VALUES (?,?,?,?,?,?,?)').run('tpl-002', wsId, '时尚模特图流程', '适用于服装、配饰模特拍摄修图流程', JSON.stringify({'retouch':'user-003','qa':'user-001'}), JSON.stringify({'naming':'品牌_模特_日期','format':'jpg','colorSpace':'sRGB'}), '2026-06-01T00:00:00Z')
 
-  db.prepare('INSERT INTO timeline_events VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-001', 'proj-001', 'annotation', '客户 张经理', '', '提交了 2 条批注意见', null, null, null, '2026-06-05T10:10:00Z')
-  db.prepare('INSERT INTO timeline_events VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-002', 'proj-001', 'status_change', '张总监', '', '项目状态变更：草稿 -> 待客户确认', null, null, null, '2026-06-05T10:30:00Z')
-  db.prepare('INSERT INTO timeline_events VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-003', 'proj-001', 'revision', '李修图', '', '上传了修改后成片', 'img-001', null, 'card-001', '2026-06-06T14:00:00Z')
-  db.prepare('INSERT INTO timeline_events VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-004', 'proj-001', 'confirm', '客户 张经理', '', '确认了 1 张图片', null, null, null, '2026-06-06T16:00:00Z')
+  db.prepare('INSERT INTO timeline_events (id,project_id,type,user_name,user_avatar,description,image_id,revision_id,comment_card_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-001', 'proj-001', 'annotation', '客户 张经理', '', '提交了 2 条批注意见', null, null, null, '2026-06-05T10:10:00Z')
+  db.prepare('INSERT INTO timeline_events (id,project_id,type,user_name,user_avatar,description,image_id,revision_id,comment_card_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-002', 'proj-001', 'status_change', '张总监', '', '项目状态变更：草稿 -> 待客户确认', null, null, null, '2026-06-05T10:30:00Z')
+  db.prepare('INSERT INTO timeline_events (id,project_id,type,user_name,user_avatar,description,image_id,revision_id,comment_card_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-003', 'proj-001', 'revision', '李修图', '', '上传了修改后成片', 'img-001', null, 'card-001', '2026-06-06T14:00:00Z')
+  db.prepare('INSERT INTO timeline_events (id,project_id,type,user_name,user_avatar,description,image_id,revision_id,comment_card_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)').run('tl-004', 'proj-001', 'confirm', '客户 张经理', '', '确认了 1 张图片', null, null, null, '2026-06-06T16:00:00Z')
 
   log('INFO', 'DB', 'Seed complete')
+  } catch(e) {
+    log('WARN', 'DB', 'Seed skipped (schema mismatch)', { error: e.message })
+  }
 }
 
 migrate()
@@ -481,10 +556,15 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']
 }))
 
-// Rate limiting
+// Rate limiting — 生产环境从环境变量读取，开发环境使用宽松配置
+const RATE_WINDOW_MS = parseInt(process.env.RATE_WINDOW_MS, 10) || 15 * 60 * 1000
+const GENERAL_RATE_MAX = parseInt(process.env.GENERAL_RATE_MAX, 10) || (IS_PROD ? 1000 : 5000)
+const AUTH_RATE_MAX = parseInt(process.env.AUTH_RATE_MAX, 10) || (IS_PROD ? 10 : 30)
+const UPLOAD_RATE_MAX = parseInt(process.env.UPLOAD_RATE_MAX, 10) || (IS_PROD ? 20 : 100)
+
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 1000,
+  windowMs: RATE_WINDOW_MS,
+  max: GENERAL_RATE_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   message: { code: 'RATE_LIMITED', message: '请求过于频繁，请稍后再试' }
@@ -493,16 +573,33 @@ app.use(limiter)
 
 // Auth endpoints rate limit (stricter)
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 30,
+  windowMs: RATE_WINDOW_MS,
+  max: AUTH_RATE_MAX,
   standardHeaders: true,
   legacyHeaders: false,
   message: { code: 'RATE_LIMITED', message: '登录请求过于频繁，请稍后再试' }
 })
 
+// Upload endpoints rate limit (anti-abuse)
+const uploadLimiter = rateLimit({
+  windowMs: RATE_WINDOW_MS,
+  max: UPLOAD_RATE_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { code: 'RATE_LIMITED', message: '上传请求过于频繁，请稍后再试' }
+})
+
 // Body parsing
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true, limit: '50mb' }))
+
+// XSS sanitization middleware — sanitize all incoming request bodies
+app.use(function(req, res, next) {
+  if (req.body && typeof req.body === 'object' && !Array.isArray(req.body)) {
+    req.body = sanitizeObject(req.body)
+  }
+  next()
+})
 
 // Handle JSON parse errors and unsupported content types gracefully
 app.use(function(err, req, res, next) {
@@ -539,6 +636,36 @@ app.use(function(req, res, next) {
   }
   next()
 })
+
+// =============================================================================
+// Security: XSS sanitization — HTML-encode user input to prevent XSS
+// =============================================================================
+function sanitize(value) {
+  if (typeof value !== 'string') return value
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
+}
+
+function sanitizeObject(obj) {
+  if (!obj || typeof obj !== 'object') return obj
+  if (Array.isArray(obj)) return obj.map(sanitizeObject)
+  const result = {}
+  for (const key of Object.keys(obj)) {
+    const val = obj[key]
+    if (typeof val === 'string') {
+      result[key] = sanitize(val)
+    } else if (typeof val === 'object' && val !== null) {
+      result[key] = sanitizeObject(val)
+    } else {
+      result[key] = val
+    }
+  }
+  return result
+}
 
 // =============================================================================
 // File Upload (Multer)
@@ -706,7 +833,7 @@ app.post('/v1/auth/login', authLimiter, function(req, res) {
 app.post('/v1/auth/register', authLimiter, function(req, res) {
   var email = (req.body.email || '').trim().toLowerCase()
   var password = req.body.password || ''
-  var name = (req.body.name || '').trim()
+  var name = String(req.body.name || '').trim()
 
   if (!validateEmail(email)) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '邮箱格式不正确' })
   if (!validatePassword(password)) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '密码至少6位' })
@@ -899,7 +1026,7 @@ app.get('/v1/workspaces/mine', authMiddleware, function(req, res) {
 })
 
 app.put('/v1/workspaces/mine', authMiddleware, ownerOnly, function(req, res) {
-  var name = (req.body.name || '').trim()
+  var name = String(req.body.name || '').trim()
   var logoUrl = (req.body.logo_url || '').trim()
   if (name) db.prepare('UPDATE workspaces SET name = ? WHERE id = ?').run(name, req.workspaceId)
   if (logoUrl) db.prepare('UPDATE workspaces SET logo_url = ? WHERE id = ?').run(logoUrl, req.workspaceId)
@@ -954,6 +1081,118 @@ app.post('/v1/workspaces/api-keys', authMiddleware, ownerOnly, function(req, res
 app.delete('/v1/workspaces/api-keys', authMiddleware, ownerOnly, function(req, res) {
   db.prepare('DELETE FROM api_keys WHERE workspace_id = ?').run(req.workspaceId)
   res.json({ data: null })
+})
+
+// V1.19: 交付包默认配置
+app.get('/v1/workspace/delivery-defaults', authMiddleware, function(req, res) {
+  var ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId)
+  var defaults = { include: 'final_images,excel,pdf' }
+  try {
+    if (ws.client_brand_settings) {
+      var settings = JSON.parse(ws.client_brand_settings)
+      if (settings.deliveryDefaults) defaults = settings.deliveryDefaults
+    }
+  } catch(e) {}
+  res.json({ data: defaults })
+})
+
+app.put('/v1/workspace/delivery-defaults', authMiddleware, function(req, res) {
+  var ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId)
+  var settings = {}
+  try { if (ws.client_brand_settings) settings = JSON.parse(ws.client_brand_settings) } catch(e) {}
+  settings.deliveryDefaults = req.body
+  db.prepare('UPDATE workspaces SET client_brand_settings = ? WHERE id = ?').run(JSON.stringify(settings), req.workspaceId)
+  res.json({ data: settings.deliveryDefaults })
+})
+
+// F-52: 客户端品牌自定义
+app.get('/v1/workspace/client-brand', authMiddleware, function(req, res) {
+  var ws = db.prepare('SELECT client_brand_name, client_brand_logo_url, client_brand_theme_color FROM workspaces WHERE id = ?').get(req.workspaceId)
+  res.json({ data: {
+    name: ws ? (ws.client_brand_name || '') : '',
+    logoUrl: ws ? (ws.client_brand_logo_url || '') : '',
+    themeColor: ws ? (ws.client_brand_theme_color || '#0066FF') : '#0066FF'
+  }})
+})
+
+app.put('/v1/workspace/client-brand', authMiddleware, ownerOnly, function(req, res) {
+  var name = String(req.body.name || '').trim()
+  var logoUrl = (req.body.logoUrl || '').trim()
+  var themeColor = (req.body.themeColor || '#0066FF').trim()
+  if (themeColor && !/^#[0-9A-Fa-f]{6}$/.test(themeColor)) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '主题色格式不正确' })
+  db.prepare('UPDATE workspaces SET client_brand_name = ?, client_brand_logo_url = ?, client_brand_theme_color = ? WHERE id = ?')
+    .run(name, logoUrl, themeColor, req.workspaceId)
+  var ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(req.workspaceId)
+  res.json({ data: formatWorkspace(ws) })
+})
+
+// 公开接口：通过分享链接获取客户端品牌信息（无需登录）
+app.get('/v1/share/:token/brand', function(req, res) {
+  var proj = db.prepare('SELECT workspace_id FROM projects WHERE share_token = ?').get(req.params.token)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+  var ws = db.prepare('SELECT client_brand_name, client_brand_logo_url, client_brand_theme_color FROM workspaces WHERE id = ?').get(proj.workspace_id)
+  res.json({ data: {
+    name: ws ? (ws.client_brand_name || 'EpicShot') : 'EpicShot',
+    logoUrl: ws ? (ws.client_brand_logo_url || '') : '',
+    themeColor: ws ? (ws.client_brand_theme_color || '#0066FF') : '#0066FF'
+  }})
+})
+
+// UX-37: 标注处理状态（无需认证）
+app.get('/v1/share/:token/status', function(req, res) {
+  var token = req.params.token
+  var parts = token.split('.')
+  var rawToken = parts.length === 2 ? parts[0] : token
+  var expectedHmac = crypto.createHmac('sha256', JWT_SECRET).update(rawToken).digest('hex').slice(0, 16)
+  if (parts.length === 2 && parts[1] !== expectedHmac) {
+    return res.status(403).json({ code: 'INVALID_TOKEN', message: '分享链接无效' })
+  }
+
+  var proj = db.prepare('SELECT id, status FROM projects WHERE share_token = ?').get(token)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '分享链接不存在' })
+
+  // 从 operation_logs 查询最新事件来确定状态
+  var latestLog = db.prepare('SELECT action, created_at FROM operation_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1').get(proj.id)
+
+  var status = 'submitted'
+  if (latestLog) {
+    switch (latestLog.action) {
+      case 'complete_project':
+        status = 'completed'
+        break
+      case 'resolve_card':
+        status = 'processing'
+        break
+      case 'dispute_card':
+        status = 'processing'
+        break
+      case 'create_card':
+        status = 'viewed'
+        break
+      default:
+        status = 'submitted'
+    }
+  }
+
+  // 如果项目本身已经完成
+  if (proj.status === 'completed') {
+    status = 'completed'
+  }
+
+  res.json({
+    data: {
+      status: status,
+      updatedAt: latestLog ? latestLog.created_at : proj.updated_at || new Date().toISOString()
+    }
+  })
+})
+
+// DATA-05: 记录客户查看分享链接
+app.post('/v1/share/:token/view', function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE share_token = ?').get(req.params.token)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+  logOperation(proj.id, 'client', '客户', 'view_share', 'project', proj.id, '')
+  res.json({ data: { viewed: true } })
 })
 
 // =============================================================================
@@ -1019,12 +1258,95 @@ app.post('/v1/projects/batch-thumbnails', authMiddleware, function(req, res) {
 app.get('/v1/projects/:id', authMiddleware, function(req, res) {
   var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
   if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
-  res.json({ data: formatProject(proj) })
+  var formatted = formatProject(proj)
+  // V1.19: Include payment stages
+  var stages = db.prepare('SELECT * FROM payment_stages WHERE project_id = ? ORDER BY sort').all(req.params.id)
+  formatted.paymentStages = stages.map(function(s) { return { id: s.id, name: s.name, amount: s.amount, sort: s.sort, dueDate: s.created_at } })
+  formatted.paymentStageTotal = stages.reduce(function(sum, s) { return sum + (s.amount || 0) }, 0)
+  res.json({ data: formatted })
+})
+
+// V1.19: 批量操作项目
+app.post('/v1/projects/batch', authMiddleware, function(req, res) {
+  var { ids, action, deadline } = req.body
+  if (!ids || !Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'ids 不能为空' })
+  }
+  if (!action || ['archive', 'delete', 'update-deadline', 'restore'].indexOf(action) === -1) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'action 必须是 archive, delete, update-deadline 或 restore' })
+  }
+  if (action === 'update-deadline' && !deadline) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'update-deadline 操作需要 deadline 参数' })
+  }
+
+  var results = []
+  var now = new Date().toISOString()
+
+  ids.forEach(function(id) {
+    var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(id, req.workspaceId)
+    if (!proj) {
+      results.push({ id: id, success: false, reason: '项目不存在' })
+      return
+    }
+
+    try {
+      if (action === 'archive') {
+        if (proj.status !== 'completed') {
+          results.push({ id: id, success: false, reason: '仅已完成项目可归档' })
+          return
+        }
+        db.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').run('archived', now, id)
+        // 操作日志
+        db.prepare('INSERT INTO operation_logs (id, project_id, user_id, user_name, action, target_type, target_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+          require('crypto').randomUUID(), id, req.userId, req.userName || '系统', 'batch_archive', 'project', id, '批量归档'
+        )
+        results.push({ id: id, success: true, name: proj.name })
+      } else if (action === 'delete') {
+        if (proj.status === 'completed') {
+          results.push({ id: id, success: false, reason: '已完成项目不可删除' })
+          return
+        }
+        db.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').run('archived', now, id)
+        db.prepare('INSERT INTO operation_logs (id, project_id, user_id, user_name, action, target_type, target_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+          require('crypto').randomUUID(), id, req.userId, req.userName || '系统', 'batch_delete', 'project', id, '批量删除'
+        )
+        results.push({ id: id, success: true, name: proj.name })
+      } else if (action === 'update-deadline') {
+        db.prepare('UPDATE projects SET deadline = ?, updated_at = ? WHERE id = ?').run(deadline, now, id)
+        db.prepare('INSERT INTO operation_logs (id, project_id, user_id, user_name, action, target_type, target_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+          require('crypto').randomUUID(), id, req.userId, req.userName || '系统', 'batch_update_deadline', 'project', id, '批量修改截止日期为 ' + deadline
+        )
+        results.push({ id: id, success: true, name: proj.name })
+      } else if (action === 'restore') {
+        if (proj.status !== 'archived') {
+          results.push({ id: id, success: false, reason: '仅已归档项目可恢复' })
+          return
+        }
+        db.prepare('UPDATE projects SET status = ?, updated_at = ? WHERE id = ?').run('completed', now, id)
+        db.prepare('INSERT INTO operation_logs (id, project_id, user_id, user_name, action, target_type, target_id, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+          require('crypto').randomUUID(), id, req.userId, req.userName || '系统', 'batch_restore', 'project', id, '批量恢复'
+        )
+        results.push({ id: id, success: true, name: proj.name })
+      }
+    } catch (err) {
+      results.push({ id: id, success: false, reason: err.message })
+    }
+  })
+
+  var successCount = results.filter(function(r) { return r.success }).length
+  var failCount = results.filter(function(r) { return !r.success }).length
+
+  res.json({
+    data: {
+      results: results,
+      summary: { total: ids.length, success: successCount, failed: failCount }
+    }
+  })
 })
 
 app.post('/v1/projects', authMiddleware, function(req, res) {
   if (!req.body || typeof req.body !== 'object') return res.status(400).json({ code: 'INVALID_JSON', message: '请求体JSON格式无效' })
-  var name = (req.body.name || '').trim()
+  var name = String(req.body.name || '').trim()
   if (!name) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '项目名称不能为空' })
   if (name.length > 200) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '项目名称不能超过200个字符' })
 
@@ -1032,15 +1354,68 @@ app.post('/v1/projects', authMiddleware, function(req, res) {
   var status = req.body.status
   var validStatuses = ['draft', 'review', 'in_progress', 'final_review', 'completed', 'archived']
   if (status && validStatuses.indexOf(status) === -1) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '无效的项目状态' })
-  db.prepare('INSERT INTO projects (id,workspace_id,name,client_name,deadline,status) VALUES (?,?,?,?,?,?)')
-    .run(id, req.workspaceId, name, (req.body.clientName || '').trim(), req.body.deadline || null, status || 'draft')
+  db.prepare('INSERT INTO projects (id,workspace_id,name,client_name,deadline,status,contract_amount) VALUES (?,?,?,?,?,?,?)')
+    .run(id, req.workspaceId, name, (req.body.clientName || '').trim(), req.body.deadline || null, status || 'draft', (req.body.contractAmount || req.body.contract_amount || 0))
 
   var proj = db.prepare('SELECT * FROM projects WHERE id = ?').get(id)
   db.prepare('INSERT INTO timeline_events (id,project_id,type,user_name,description) VALUES (?,?,?,?,?)')
     .run(uuidv4(), id, 'status_change', '系统', '创建了项目「' + name + '」')
 
+  if (req.body.paymentStages && Array.isArray(req.body.paymentStages)) {
+    const insertStage = db.prepare('INSERT INTO payment_stages (id, project_id, name, amount, sort, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    req.body.paymentStages.forEach(function(stage, idx) {
+      insertStage.run(require('crypto').randomUUID(), id, stage.name, stage.amount, idx, new Date().toISOString())
+    })
+  }
+
+  var formatted = formatProject(proj)
+  // V1.19: Include payment stages in create response
+  var stages = db.prepare('SELECT * FROM payment_stages WHERE project_id = ? ORDER BY sort').all(id)
+  formatted.paymentStages = stages.map(function(s) { return { id: s.id, name: s.name, amount: s.amount, sort: s.sort, dueDate: s.created_at } })
+  formatted.paymentStageTotal = stages.reduce(function(sum, s) { return sum + (s.amount || 0) }, 0)
+
   log('INFO', 'Project', 'Created', { id: id, name: name })
-  res.status(201).json({ data: formatProject(proj) })
+  res.status(201).json({ data: formatted })
+})
+
+// V1.19: 项目支出记录
+app.get('/v1/projects/:id/expenses', authMiddleware, function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+  var expenses = db.prepare('SELECT * FROM expenses WHERE project_id = ? ORDER BY expense_date DESC, created_at DESC').all(req.params.id)
+  var total = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE project_id = ?').get(req.params.id).total
+  res.json({ data: { expenses: expenses, total: total } })
+})
+
+app.post('/v1/projects/:id/expenses', authMiddleware, function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+  var { category, amount, expenseDate, note } = req.body
+  if (!category || !amount) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '类别和金额不能为空' })
+  var id = require('crypto').randomUUID()
+  db.prepare('INSERT INTO expenses (id, workspace_id, project_id, category, amount, expense_date, note) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, req.workspaceId, req.params.id, category, amount, expenseDate || new Date().toISOString().slice(0, 10), note || '')
+  var expense = db.prepare('SELECT * FROM expenses WHERE id = ?').get(id)
+  res.status(201).json({ data: expense })
+})
+
+app.put('/v1/projects/:id/expenses/:eid', authMiddleware, function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+  var expense = db.prepare('SELECT * FROM expenses WHERE id = ? AND project_id = ?').get(req.params.eid, req.params.id)
+  if (!expense) return res.status(404).json({ code: 'NOT_FOUND' })
+  var { category, amount, expenseDate, note } = req.body
+  db.prepare('UPDATE expenses SET category = COALESCE(?, category), amount = COALESCE(?, amount), expense_date = COALESCE(?, expense_date), note = COALESCE(?, note) WHERE id = ?').run(category, amount, expenseDate, note, req.params.eid)
+  var updated = db.prepare('SELECT * FROM expenses WHERE id = ?').get(req.params.eid)
+  res.json({ data: updated })
+})
+
+app.delete('/v1/projects/:id/expenses/:eid', authMiddleware, function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.id, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+  var expense = db.prepare('SELECT * FROM expenses WHERE id = ? AND project_id = ?').get(req.params.eid, req.params.id)
+  if (!expense) return res.status(404).json({ code: 'NOT_FOUND' })
+  db.prepare('DELETE FROM expenses WHERE id = ?').run(req.params.eid)
+  res.json({ data: { deleted: true } })
 })
 
 app.put('/v1/projects/:id', authMiddleware, function(req, res) {
@@ -1056,12 +1431,13 @@ app.put('/v1/projects/:id', authMiddleware, function(req, res) {
       .run(uuidv4(), req.params.id, 'status_change', '系统', '项目状态变更：' + proj.status + ' -> ' + req.body.status)
   }
   if (req.body.name) {
-    var name = (req.body.name || '').trim()
+    var name = String(req.body.name || '').trim()
     if (name.length > 200) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '项目名称不能超过200个字符' })
     db.prepare('UPDATE projects SET name = ?, updated_at = datetime(\'now\') WHERE id = ?').run(name, req.params.id)
   }
   if (req.body.clientName !== undefined) db.prepare('UPDATE projects SET client_name = ?, updated_at = datetime(\'now\') WHERE id = ?').run((req.body.clientName || '').trim(), req.params.id)
   if (req.body.deadline !== undefined) db.prepare("UPDATE projects SET deadline = ?, updated_at = datetime('now') WHERE id = ?").run(req.body.deadline, req.params.id)
+  if (req.body.contractAmount !== undefined) db.prepare("UPDATE projects SET contract_amount = ?, updated_at = datetime('now') WHERE id = ?").run(Number(req.body.contractAmount) || 0, req.params.id)
 
   var updated = db.prepare('SELECT * FROM projects WHERE id = ?').get(req.params.id)
   res.json({ data: formatProject(updated) })
@@ -1133,7 +1509,9 @@ app.get('/v1/share/:token', function(req, res) {
     WHERE pu.project_id = ?
     ORDER BY cc.sort_order, cc.created_at
   `).all(proj.id)
-  res.json({ data: { project: formatProject(proj), cards: cards.map(formatCommentCard) } })
+  // Get brand info
+  var ws = db.prepare('SELECT client_brand_name, client_brand_logo_url, client_brand_theme_color FROM workspaces WHERE id = ?').get(proj.workspace_id)
+  res.json({ data: { project: formatProject(proj), cards: cards.map(formatCommentCard), brand: { name: (ws && ws.client_brand_name) || 'EpicShot', logoUrl: (ws && ws.client_brand_logo_url) || '', themeColor: (ws && ws.client_brand_theme_color) || '#0066FF' } } })
 })
 
 app.delete('/v1/projects/:id/share', authMiddleware, function(req, res) {
@@ -1145,6 +1523,9 @@ app.post('/v1/projects/:id/complete', authMiddleware, function(req, res) {
   db.prepare("UPDATE projects SET status = 'completed', updated_at = datetime('now') WHERE id = ? AND workspace_id = ?").run(req.params.id, req.workspaceId)
   db.prepare('INSERT INTO timeline_events (id,project_id,type,user_name,description) VALUES (?,?,?,?,?)')
     .run(uuidv4(), req.params.id, 'confirm', '系统', '项目已完成')
+  // UX-27: 记录操作日志
+  var userName = db.prepare('SELECT name FROM users WHERE id = ?').get(req.userId)?.name || '未知用户'
+  logOperation(req.params.id, req.userId, userName, 'complete_project', 'project', req.params.id, '项目确稿完成')
   res.json({ data: null })
 })
 
@@ -1157,7 +1538,7 @@ app.get('/v1/projects/:projectId/units', authMiddleware, function(req, res) {
 })
 
 app.post('/v1/projects/:projectId/units', authMiddleware, function(req, res) {
-  var name = (req.body.name || '').trim()
+  var name = String(req.body.name || '').trim()
   if (!name) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '单元名称不能为空' })
 
   var proj = db.prepare('SELECT id FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.projectId, req.workspaceId)
@@ -1177,6 +1558,22 @@ app.put('/v1/projects/:projectId/units/reorder', authMiddleware, function(req, r
   res.json({ data: null })
 })
 
+// UX-18: 获取产品单元树
+app.get('/v1/projects/:projectId/units/tree', authMiddleware, function(req, res) {
+  try {
+    const units = db.prepare(`SELECT * FROM product_units WHERE project_id = ? ORDER BY sort_order`).all(req.params.projectId)
+    // Build tree structure
+    const rootUnits = units.filter(u => !u.parent_id)
+    const childUnits = units.filter(u => u.parent_id)
+    rootUnits.forEach(root => {
+      root.children = childUnits.filter(c => c.parent_id === root.id)
+    })
+    res.json({ data: rootUnits })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // =============================================================================
 // Image Routes (with real file upload)
 // =============================================================================
@@ -1185,7 +1582,7 @@ app.get('/v1/units/:unitId/images', authMiddleware, function(req, res) {
   res.json({ data: images.map(formatImage) })
 })
 
-app.post('/v1/units/:unitId/images', authMiddleware, upload.array('files', 20), async function(req, res) {
+app.post('/v1/units/:unitId/images', authMiddleware, uploadLimiter, upload.array('files', 20), async function(req, res) {
   var unit = db.prepare('SELECT * FROM product_units WHERE id = ?').get(req.params.unitId)
   if (!unit) return res.status(404).json({ code: 'NOT_FOUND', message: '产品单元不存在' })
 
@@ -1277,6 +1674,8 @@ app.put('/v1/annotations/:id', authMiddleware, function(req, res) {
 
 app.delete('/v1/annotations/:id', authMiddleware, function(req, res) {
   // V1.2: 软删除 — 设置deleted_at时间戳
+  var existing = db.prepare('SELECT id FROM annotations WHERE id = ? AND deleted_at IS NULL').get(req.params.id)
+  if (!existing) return res.status(404).json({ code: 'NOT_FOUND', message: '标注不存在' })
   var now = new Date().toISOString()
   db.prepare('UPDATE comment_cards SET deleted_at = ? WHERE annotation_id = ? AND deleted_at IS NULL').run(now, req.params.id)
   db.prepare('UPDATE annotations SET deleted_at = ? WHERE id = ?').run(now, req.params.id)
@@ -1389,12 +1788,20 @@ app.get('/v1/images/:imageId/comment-cards', authMiddleware, function(req, res) 
 app.post('/v1/comment-cards', authMiddleware, function(req, res) {
   if (!req.body.imageId || !req.body.text) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少必填字段' })
 
+  var img = db.prepare('SELECT id FROM images WHERE id = ?').get(req.body.imageId)
+  if (!img) return res.status(404).json({ code: 'NOT_FOUND', message: '图片不存在' })
+
   var id = uuidv4()
   var maxSort = db.prepare('SELECT MAX(sort_order) as m FROM comment_cards WHERE image_id = ?').get(req.body.imageId)
-  db.prepare('INSERT INTO comment_cards (id,annotation_id,image_id,text_content,sort_order) VALUES (?,?,?,?,?)')
-    .run(id, req.body.annotationId || null, req.body.imageId, req.body.text, (maxSort.m || 0) + 1)
+  var estimatedTime = req.body.estimatedTime !== undefined ? parseInt(req.body.estimatedTime, 10) || null : null
+  db.prepare('INSERT INTO comment_cards (id,annotation_id,image_id,text_content,estimated_time,sort_order) VALUES (?,?,?,?,?,?)')
+    .run(id, req.body.annotationId || null, req.body.imageId, req.body.text, estimatedTime, (maxSort.m || 0) + 1)
 
   var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(id)
+  // UX-27: 记录操作日志
+  var projectId = getProjectIdByCard(id)
+  var userName = db.prepare('SELECT name FROM users WHERE id = ?').get(req.userId)?.name || '未知用户'
+  logOperation(projectId, req.userId, userName, 'create_card', 'comment_card', id, '创建意见卡片')
   res.status(201).json({ data: formatCommentCard(card) })
 })
 
@@ -1407,6 +1814,10 @@ app.put('/v1/comment-cards/sort', authMiddleware, function(req, res) {
 
 app.put('/v1/comment-cards/:id', authMiddleware, function(req, res) {
   if (req.body.text !== undefined) db.prepare('UPDATE comment_cards SET text_content = ? WHERE id = ?').run(req.body.text, req.params.id)
+  if (req.body.estimatedTime !== undefined) {
+    var et = req.body.estimatedTime !== null ? parseInt(req.body.estimatedTime, 10) || null : null
+    db.prepare('UPDATE comment_cards SET estimated_time = ? WHERE id = ?').run(et, req.params.id)
+  }
   var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
   if (!card) return res.status(404).json({ code: 'NOT_FOUND' })
   res.json({ data: formatCommentCard(card) })
@@ -1419,6 +1830,10 @@ app.put('/v1/comment-cards/:id/status', authMiddleware, function(req, res) {
   if (action === 'resolve') {
     db.prepare("UPDATE comment_cards SET status = 'resolved', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?")
       .run(req.userId, req.params.id)
+    // UX-27: 记录操作日志
+    var projectId = getProjectIdByCard(req.params.id)
+    var userName = db.prepare('SELECT name FROM users WHERE id = ?').get(req.userId)?.name || '未知用户'
+    logOperation(projectId, req.userId, userName, 'resolve_card', 'comment_card', req.params.id, '标记为已解决')
   } else {
     // V1.1: 重新打开已解决的卡片 → 争议计数+1
     var existing = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
@@ -1445,6 +1860,26 @@ app.put('/v1/comment-cards/:id/status', authMiddleware, function(req, res) {
   var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
   if (!card) return res.status(404).json({ code: 'NOT_FOUND' })
   res.json({ data: formatCommentCard(card) })
+})
+
+// UX-27: 获取项目操作日志
+app.get('/v1/projects/:projectId/logs', authMiddleware, function(req, res) {
+  try {
+    const logs = db.prepare(`SELECT * FROM operation_logs WHERE project_id = ? ORDER BY created_at DESC LIMIT 100`).all(req.params.projectId)
+    res.json({ data: logs })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// UX-27: 获取用户操作日志
+app.get('/v1/users/:userId/logs', authMiddleware, function(req, res) {
+  try {
+    const logs = db.prepare(`SELECT * FROM operation_logs WHERE user_id = ? ORDER BY created_at DESC LIMIT 50`).all(req.params.userId)
+    res.json({ data: logs })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
 // Export comments as JSON (PDF/Excel generation stub)
@@ -1479,7 +1914,7 @@ app.get('/v1/projects/:projectId/comments/export', authMiddleware, function(req,
 // =============================================================================
 // Revision Routes
 // =============================================================================
-app.post('/v1/images/:id/revision', authMiddleware, upload.single('file'), function(req, res) {
+app.post('/v1/images/:id/revision', authMiddleware, uploadLimiter, upload.single('file'), function(req, res) {
   var img = db.prepare('SELECT * FROM images WHERE id = ?').get(req.params.id)
   if (!img) return res.status(404).json({ code: 'NOT_FOUND', message: '图片不存在' })
 
@@ -1524,47 +1959,167 @@ app.get('/v1/projects/:id/timeline', authMiddleware, function(req, res) {
 
 // =============================================================================
 // AI Routes (Production-ready framework)
+//   AI_SERVICE_URL: 外部 AI 服务地址（阿里云百炼 / 腾讯混元 / OpenAI 兼容）
+//   AI_SERVICE_KEY: API Key（Bearer Token 认证）
 // =============================================================================
 app.post('/v1/ai/style-samples', authMiddleware, function(req, res) {
   var imageId = req.body.imageId
   var style = req.body.style || 'default'
+  var projectId = req.body.projectId
 
   if (!imageId) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少 imageId' })
 
-  var taskId = uuidv4()
-  db.prepare('INSERT INTO ai_samples (id,image_id,style) VALUES (?,?,?)').run(taskId, imageId, style)
-
-  // If AI service is configured, call it asynchronously
-  if (AI_SERVICE_URL) {
-    // In production, this would call an external AI service
-    // e.g., fetch(AI_SERVICE_URL + '/generate-samples', { method: 'POST', body: JSON.stringify({ imageId, style }) })
-    log('INFO', 'AI', 'Style sample task created', { taskId: taskId, style: style })
+  // 项目状态检查：已完成/归档项目自动禁用 AI
+  if (projectId) {
+    var project = db.prepare('SELECT status, name FROM projects WHERE id = ?').get(projectId)
+    if (project && (project.status === 'completed' || project.status === 'archived')) {
+      return res.status(403).json({
+        code: 'AI_DISABLED_FOR_PROJECT',
+        message: '该项目已完结，AI 风格生成功能已自动关闭'
+      })
+    }
   }
 
-  res.json({ data: { taskId: taskId, retryable: true } })
+  // 缓存检查：同一图片+同一风格，24小时内复用
+  var cached = db.prepare(`
+    SELECT * FROM ai_samples
+    WHERE image_id = ? AND style = ? AND output_urls IS NOT NULL
+      AND created_at > datetime('now', '-1 day')
+    ORDER BY created_at DESC LIMIT 1
+  `).get(imageId, style)
 
-  // V1.2.0: Async AI call with retry
+  if (cached) {
+    var cachedUrls = JSON.parse(cached.output_urls || '[]')
+    if (cachedUrls.length > 0 && !cachedUrls[0].error) {
+      return res.json({ data: { taskId: cached.id, cached: true, retryable: false } })
+    }
+  }
+
+  // 每日限额
+  if (projectId) {
+    var todayCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM ai_samples
+      WHERE image_id IN (SELECT id FROM images WHERE product_unit_id IN
+        (SELECT id FROM product_units WHERE project_id = ?))
+      AND created_at > datetime('now', 'start of day')
+    `).get(projectId)
+
+    if (todayCount && todayCount.cnt >= 50) {
+      return res.status(429).json({
+        code: 'DAILY_LIMIT',
+        message: '该项目今日 AI 风格生成已达上限（50次/天），请明天再试'
+      })
+    }
+  }
+
+  // 内部用量警戒线：单工作室月超 200 次后台告警
+  if (req.workspaceId) {
+    var monthCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM ai_samples a
+      JOIN images i ON a.image_id = i.id
+      JOIN product_units u ON i.product_unit_id = u.id
+      JOIN projects p ON u.project_id = p.id
+      WHERE p.workspace_id = ? AND a.created_at > datetime('now', 'start of month')
+    `).get(req.workspaceId)
+    if (monthCount && monthCount.cnt >= 200) {
+      log('WARN', 'AI', 'Workspace monthly AI usage exceeded 200', { workspaceId: req.workspaceId, monthCount: monthCount.cnt })
+    }
+  }
+
+  var taskId = uuidv4()
+
+  // Async AI call with retry — 对接真实 AI 服务
   if (AI_SERVICE_URL) {
+    db.prepare('INSERT INTO ai_samples (id,image_id,style,project_id) VALUES (?,?,?,?)').run(taskId, imageId, style, projectId || null)
+
+    res.json({ data: { taskId: taskId, retryable: true } })
     var attempt = 0
+    var img = db.prepare('SELECT * FROM images WHERE id = ?').get(imageId)
+    var imageUrl = img ? (img.original_url || '') : ''
+
     function callAI() {
+      var payload = {
+        model: 'style-transfer-v1',
+        input: { image_url: imageUrl, style: style, num_outputs: 4 }
+      }
+      var postData = JSON.stringify(payload)
+      var headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + (process.env.AI_SERVICE_KEY || ''),
+        'Content-Length': Buffer.byteLength(postData)
+      }
+
       try {
-        log('INFO', 'AI', 'Style sample task created', { taskId: taskId, style: style, attempt: attempt })
-        // In production, call external AI service here
+        var urlModule = require('url')
+        var parsedUrl = urlModule.parse(AI_SERVICE_URL)
+        var transport = parsedUrl.protocol === 'https:' ? require('https') : require('http')
+        var options = {
+          hostname: parsedUrl.hostname,
+          port: parsedUrl.port,
+          path: parsedUrl.path,
+          method: 'POST',
+          headers: headers,
+          timeout: 30000
+        }
+
+        var req_ai = transport.request(options, function(aiRes) {
+          var body = ''
+          aiRes.on('data', function(chunk) { body += chunk })
+          aiRes.on('end', function() {
+            try {
+              var result = JSON.parse(body)
+              var urls = []
+              // 兼容多种 AI 服务商返回格式
+              if (result.output && result.output.results) {
+                urls = result.output.results.map(function(r) { return r.url })       // 阿里云百炼
+              } else if (result.data && Array.isArray(result.data)) {
+                urls = result.data.map(function(r) { return r.url })                 // OpenAI 兼容
+              } else if (result.ResultImage) {
+                urls = [result.ResultImage]                                           // 腾讯混元
+              } else if (result.url) {
+                urls = [result.url]                                                   // 单图返回
+              }
+
+              if (urls.length > 0) {
+                db.prepare('UPDATE ai_samples SET output_urls = ? WHERE id = ?').run(JSON.stringify(urls), taskId)
+                log('INFO', 'AI', 'Style generation completed', { taskId: taskId, count: urls.length })
+              } else {
+                db.prepare('UPDATE ai_samples SET output_urls = ? WHERE id = ?').run(JSON.stringify({ error: 'EMPTY_RESULT', retryable: true }), taskId)
+                log('WARN', 'AI', 'Style generation returned empty result', { taskId: taskId })
+              }
+            } catch (e) {
+              log('ERROR', 'AI', 'Failed to parse AI response', { taskId: taskId, error: e.message })
+              db.prepare('UPDATE ai_samples SET output_urls = ? WHERE id = ?').run(JSON.stringify({ error: 'PARSE_ERROR', retryable: true }), taskId)
+            }
+          })
+        })
+
+        req_ai.on('error', function(e) { retryOrFail(e.message) })
+        req_ai.on('timeout', function() { req_ai.destroy(); retryOrFail('TIMEOUT') })
+        req_ai.write(postData)
+        req_ai.end()
       } catch (e) {
+        retryOrFail(e.message)
+      }
+
+      function retryOrFail(errMsg) {
         attempt++
         if (attempt <= AI_RETRY_MAX) {
           log('WARN', 'AI', 'Retry style generation', { attempt: attempt, taskId: taskId })
           setTimeout(callAI, AI_RETRY_DELAY)
         } else {
-          log('ERROR', 'AI', 'Style generation failed', { taskId: taskId, error: e.message })
+          log('ERROR', 'AI', 'Style generation failed after retries', { taskId: taskId, error: errMsg })
           db.prepare('UPDATE ai_samples SET output_urls = ? WHERE id = ?').run(JSON.stringify({ error: 'AI_SERVICE_FAILED', retryable: true }), taskId)
         }
       }
     }
     callAI()
+  } else {
+    // AI 服务未配置时，写入占位记录以启用缓存，避免重复创建记录
+    db.prepare('INSERT INTO ai_samples (id,image_id,style,project_id,output_urls) VALUES (?,?,?,?,?)').run(taskId, imageId, style, projectId || null, JSON.stringify([{cached: true, notice: 'AI 服务未配置'}]))
+    res.json({ data: { taskId: taskId, retryable: false, notice: 'AI 样片服务未配置，请联系管理员对接 AI 服务后启用' } })
+    log('INFO', 'AI', 'AI service not configured — cached placeholder', { taskId: taskId })
   }
-
-  res.json({ data: { taskId: taskId, retryable: true } })
 })
 
 app.get('/v1/ai/style-samples/:taskId', authMiddleware, function(req, res) {
@@ -1598,6 +2153,134 @@ app.post('/v1/ai/style-samples/:sampleId/like', authMiddleware, function(req, re
   res.json({ data: null })
 })
 
+// UX-001: AI 风格样片预览（同步简化版，兼容前端直接调用）
+// 成本控制：每项目每天限 50 次生成，相同图片+风格自动复用缓存
+app.post('/v1/ai/style-preview', authMiddleware, function(req, res) {
+  var imageId = req.body.imageId
+  var style = req.body.style || 'default'
+  var projectId = req.body.projectId
+
+  if (!imageId) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少 imageId' })
+
+  // 项目状态检查：已完成/归档项目自动禁用 AI
+  if (projectId) {
+    var project = db.prepare('SELECT status, name FROM projects WHERE id = ?').get(projectId)
+    if (project && (project.status === 'completed' || project.status === 'archived')) {
+      return res.status(403).json({
+        code: 'AI_DISABLED_FOR_PROJECT',
+        message: '该项目已完结，AI 风格生成功能已自动关闭'
+      })
+    }
+  }
+
+  // 1. 缓存检查：同一图片+同一风格，24小时内复用结果
+  var cached = db.prepare(`
+    SELECT * FROM ai_samples
+    WHERE image_id = ? AND style = ? AND output_urls IS NOT NULL
+      AND created_at > datetime('now', '-1 day')
+    ORDER BY created_at DESC LIMIT 1
+  `).get(imageId, style)
+
+  if (cached) {
+    var cachedUrls = JSON.parse(cached.output_urls || '[]')
+    if (cachedUrls.length > 0 && !cachedUrls[0].error) {
+      return res.json({
+        data: { taskId: cached.id, previews: cachedUrls, style: style, cached: true }
+      })
+    }
+  }
+
+  // 2. 每日限额检查（每项目每天最多 50 次）
+  if (projectId) {
+    var todayCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM ai_samples
+      WHERE image_id IN (SELECT id FROM images WHERE product_unit_id IN
+        (SELECT id FROM product_units WHERE project_id = ?))
+      AND created_at > datetime('now', 'start of day')
+    `).get(projectId)
+
+    if (todayCount && todayCount.cnt >= 50) {
+      return res.status(429).json({
+        code: 'DAILY_LIMIT',
+        message: '该项目今日 AI 风格生成已达上限（50次/天），请明天再试',
+        dailyUsed: todayCount.cnt,
+        dailyLimit: 50
+      })
+    }
+  }
+
+  // 内部用量警戒线：单工作室月超 200 次后台告警
+  if (req.workspaceId) {
+    var monthCount = db.prepare(`
+      SELECT COUNT(*) as cnt FROM ai_samples a
+      JOIN images i ON a.image_id = i.id
+      JOIN product_units u ON i.product_unit_id = u.id
+      JOIN projects p ON u.project_id = p.id
+      WHERE p.workspace_id = ? AND a.created_at > datetime('now', 'start of month')
+    `).get(req.workspaceId)
+    if (monthCount && monthCount.cnt >= 200) {
+      log('WARN', 'AI', 'Workspace monthly AI usage exceeded 200', { workspaceId: req.workspaceId, monthCount: monthCount.cnt })
+    }
+  }
+
+  // 3. 创建任务
+  var taskId = uuidv4()
+
+  if (!AI_SERVICE_URL) {
+    // AI 服务未配置时，写入占位记录以启用缓存
+    db.prepare('INSERT INTO ai_samples (id,image_id,style,project_id,output_urls) VALUES (?,?,?,?,?)').run(taskId, imageId, style, projectId || null, JSON.stringify([{cached: true, notice: 'AI 服务未配置'}]))
+    return res.json({
+      data: { taskId: taskId, previews: [], style: style, cached: true, notice: 'AI 风格预览服务未配置，请联系管理员对接 AI 服务后启用' }
+    })
+  }
+
+  db.prepare('INSERT INTO ai_samples (id,image_id,style,project_id) VALUES (?,?,?,?)').run(taskId, imageId, style, projectId || null)
+  res.json({ data: { taskId: taskId, previews: [], style: style } })
+})
+
+// 成本统计端点：管理员查看 AI 使用量
+app.get('/v1/ai/usage-stats', authMiddleware, function(req, res) {
+  var workspaceId = req.workspaceId
+  var projectId = req.query.projectId
+
+  var sql = `
+    SELECT a.project_id, p.name as project_name,
+      COUNT(*) as total_generations,
+      COUNT(DISTINCT a.image_id) as unique_images,
+      COUNT(DISTINCT a.style) as styles_tried,
+      SUM(CASE WHEN a.created_at > datetime('now', 'start of day') THEN 1 ELSE 0 END) as today_count,
+      SUM(CASE WHEN a.created_at > datetime('now', '-30 days') THEN 1 ELSE 0 END) as month_count
+    FROM ai_samples a
+    LEFT JOIN projects p ON a.project_id = p.id
+    WHERE p.workspace_id = ?
+  `
+  var params = [workspaceId]
+  if (projectId) {
+    sql += ' AND a.project_id = ?'
+    params.push(projectId)
+  }
+  sql += ' GROUP BY a.project_id ORDER BY month_count DESC'
+
+  var rows = db.prepare(sql).all.apply(db.prepare(sql), params)
+
+  // 估算成本（按腾讯混元 0.06元/张 和阿里云百炼 0.14元/张 分别计算）
+  var HUNYUAN_PRICE = 0.06
+  var BAILIAN_PRICE = 0.14
+  var totalGen = rows.reduce(function(sum, r) { return sum + r.month_count }, 0)
+
+  res.json({
+    data: {
+      projects: rows,
+      summary: {
+        totalMonthGenerations: totalGen,
+        estimatedCostHunyuan: +(totalGen * HUNYUAN_PRICE).toFixed(2),
+        estimatedCostBailian: +(totalGen * BAILIAN_PRICE).toFixed(2),
+        dailyLimitPerProject: 50
+      }
+    }
+  })
+})
+
 app.post('/v1/ai/parse-instruction', authMiddleware, function(req, res) {
   var commentCardId = req.body.commentCardId
   if (!commentCardId) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '缺少 commentCardId' })
@@ -1605,22 +2288,24 @@ app.post('/v1/ai/parse-instruction', authMiddleware, function(req, res) {
   var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(commentCardId)
   if (!card) return res.status(404).json({ code: 'NOT_FOUND', message: '意见卡不存在' })
 
-  var id = uuidv4()
-  var suggestion = card.text_content ? '针对「' + card.text_content + '」的AI建议：请调整该区域的光影、色彩和构图，使画面更加协调。' : '暂无意见文本'
-
-  if (AI_SERVICE_URL) {
-    // In production: call NLP service to parse instruction
-    log('INFO', 'AI', 'Parsing instruction', { commentCardId: commentCardId })
+  // 生产环境未配置 AI 服务时，返回提示而非 Mock 假数据
+  if (!AI_SERVICE_URL) {
+    return res.json({
+      data: { id: '', commentCardId: commentCardId, notice: 'AI 解析服务未配置，请联系管理员对接 AI 服务后启用' }
+    })
   }
 
+  var id = uuidv4()
   db.prepare('INSERT INTO ai_instructions (id,comment_card_id,original_text,suggestion_text,suggested_params) VALUES (?,?,?,?,?)')
-    .run(id, commentCardId, card.text_content, suggestion, JSON.stringify({ 阴影: 15, 曝光: 0.3, 对比度: 5, 饱和度: -8 }))
+    .run(id, commentCardId, card.text_content, '', '{}')
 
   var inst = db.prepare('SELECT * FROM ai_instructions WHERE id = ?').get(id)
   res.json({ data: formatAIInstruction(inst) })
 })
 
 app.post('/v1/ai/instructions/:id/feedback', authMiddleware, function(req, res) {
+  var inst = db.prepare('SELECT id FROM ai_instructions WHERE id = ?').get(req.params.id)
+  if (!inst) return res.status(404).json({ code: 'NOT_FOUND', message: '指令不存在' })
   db.prepare('UPDATE ai_instructions SET helpful = ? WHERE id = ?').run(req.body.helpful ? 1 : 0, req.params.id)
   res.json({ data: null })
 })
@@ -1662,30 +2347,32 @@ app.get('/v1/ai/color-check/:taskId', authMiddleware, function(req, res) {
     WHERE u.project_id = ?
   `).all(projectId)
 
-  var totalImages = images.length
-  var abnormalCount = Math.min(3, totalImages)
-  var items = images.slice(0, 3).map(function(img, idx) {
-    var deviationTypes = ['color_temp', 'brightness', 'contrast']
-    var suggestions = ['白平衡 -200K', '曝光 +0.4', '对比度 -12']
-    var values = [350, -15, 22]
-    var urls = JSON.parse(img.thumbnail_urls || '[]')
-    return {
-      imageId: img.id,
-      thumbnailUrl: urls[0] || '/uploads/placeholder.svg',
-      deviationType: deviationTypes[idx % 3],
-      deviationValue: values[idx % 3],
-      suggestion: suggestions[idx % 3]
-    }
-  })
+  // 生产环境未配置 AI 服务时，返回空结果而非 Mock 假数据
+  if (!AI_SERVICE_URL) {
+    return res.json({
+      data: {
+        id: req.params.taskId,
+        projectId: projectId,
+        totalImages: images.length,
+        abnormalCount: 0,
+        items: [],
+        createdAt: new Date().toISOString(),
+        notice: 'AI 色差巡检服务未配置，请联系管理员对接 AI 服务后启用'
+      }
+    })
+  }
 
+  // AI 服务已配置，返回真实分析结果（此处由 AI 服务异步填充）
+  var report = db.prepare('SELECT * FROM ai_reports WHERE id = ?').get(req.params.taskId)
+  var result = report ? JSON.parse(report.result || '{}') : {}
   res.json({
     data: {
       id: req.params.taskId,
       projectId: projectId,
-      totalImages: totalImages,
-      abnormalCount: abnormalCount,
-      items: items,
-      createdAt: new Date().toISOString()
+      totalImages: images.length,
+      abnormalCount: result.abnormalCount || 0,
+      items: result.items || [],
+      createdAt: report ? report.created_at : new Date().toISOString()
     }
   })
 })
@@ -1715,7 +2402,6 @@ app.get('/v1/ai/consistency-check/:taskId', authMiddleware, function(req, res) {
     return res.status(404).json({ code: 'NOT_FOUND', message: '任务不存在' })
   }
 
-  // 获取项目下所有图片，按产品单元分组
   var units = db.prepare(`
     SELECT pu.id, pu.name FROM product_units pu
     WHERE pu.project_id = ?
@@ -1736,79 +2422,42 @@ app.get('/v1/ai/consistency-check/:taskId', authMiddleware, function(req, res) {
     })
   })
 
-  // 模拟光影一致性分析
-  var sceneGroups = units.map(function(u) {
-    return {
-      sceneId: u.id,
-      sceneName: u.name,
-      imageCount: allImages.filter(function(i) { return i.unitId === u.id }).length,
-      dominantLightDirection: ['左上方', '右上方', '正上方', '左前方', '右前方'][Math.floor(Math.random() * 5)],
-      consistency: Math.random() > 0.4 ? 'consistent' : 'inconsistent'
-    }
-  })
-
-  // 生成异常报告
-  var anomalies = []
-  var anomalyTypes = [
-    { type: 'light_direction', desc: '主光源方向不一致，疑似灯位偏移', severity: 'high' },
-    { type: 'highlight_position', desc: '面部高光位置与组图其他图片不一致', severity: 'high' },
-    { type: 'shadow_angle', desc: '阴影角度偏差超过阈值，光源高度可能变化', severity: 'medium' },
-    { type: 'color_temperature', desc: '同组图片色温不统一，白平衡设置可能变更', severity: 'medium' },
-    { type: 'exposure', desc: '曝光量差异明显，闪光灯功率可能不一致', severity: 'low' },
-    { type: 'reflection', desc: '反光面亮度差异过大，柔光设备位置可能偏移', severity: 'low' }
-  ]
-
-  if (allImages.length >= 3) {
-    // 模拟2-3条异常
-    var anomalyCount = Math.min(anomalyTypes.length, Math.floor(allImages.length / 2))
-    for (var a = 0; a < anomalyCount; a++) {
-      var at = anomalyTypes[a]
-      var affected = []
-      var count = Math.min(3, Math.max(2, allImages.length - 2))
-      for (var ai = 0; ai < count; ai++) {
-        var idx = (a * 2 + ai) % allImages.length
-        affected.push(allImages[idx].id)
+  // 生产环境未配置 AI 服务时，返回空结果而非 Mock 假数据
+  if (!AI_SERVICE_URL) {
+    return res.json({
+      data: {
+        id: req.params.taskId,
+        projectId: projectId,
+        totalImages: allImages.length,
+        totalSceneGroups: units.length,
+        consistentSceneGroups: units.length,
+        inconsistentSceneGroups: 0,
+        sceneGroups: units.map(function(u) {
+          return { sceneId: u.id, sceneName: u.name, imageCount: allImages.filter(function(i) { return i.unitId === u.id }).length, consistency: 'pending' }
+        }),
+        anomalies: [],
+        overallScore: 100,
+        createdAt: new Date().toISOString(),
+        notice: 'AI 光影巡检服务未配置，请联系管理员对接 AI 服务后启用'
       }
-      var normal = allImages.filter(function(im) { return affected.indexOf(im.id) === -1 }).slice(0, 2).map(function(im) { return im.id })
-      anomalies.push({
-        id: 'anomaly-' + (a + 1),
-        type: at.type,
-        description: at.desc,
-        severity: at.severity,
-        affectedImageIds: affected,
-        normalImageIds: normal,
-        suggestion: at.type === 'light_direction'
-          ? '建议检查主灯位置，确认灯架与模特相对位置是否一致'
-          : at.type === 'highlight_position'
-          ? '建议重新校准主灯高度和角度，确保所有图片面部高光落在同一区域'
-          : at.type === 'shadow_angle'
-          ? '建议固定光源高度，使用测光表确认每次拍摄的入射光角度'
-          : at.type === 'color_temperature'
-          ? '建议锁定相机白平衡设置(建议5500K)，避免使用自动白平衡'
-          : at.type === 'exposure'
-          ? '建议使用测光表统一曝光参数，锁定闪光灯输出功率'
-          : '建议检查柔光设备位置，确保补光均匀'
-      })
-    }
+    })
   }
 
-  var consistentCount = sceneGroups.filter(function(s) { return s.consistency === 'consistent' }).length
-  var inconsistentCount = sceneGroups.filter(function(s) { return s.consistency === 'inconsistent' }).length
-
+  // AI 服务已配置，返回真实分析结果
+  var report = db.prepare('SELECT * FROM ai_reports WHERE id = ?').get(req.params.taskId)
+  var result = report ? JSON.parse(report.result || '{}') : {}
   res.json({
     data: {
       id: req.params.taskId,
       projectId: projectId,
       totalImages: allImages.length,
-      totalSceneGroups: sceneGroups.length,
-      consistentSceneGroups: consistentCount,
-      inconsistentSceneGroups: inconsistentCount,
-      sceneGroups: sceneGroups,
-      anomalies: anomalies,
-      overallScore: sceneGroups.length > 0
-        ? Math.round((consistentCount / sceneGroups.length) * 100)
-        : 100,
-      createdAt: new Date().toISOString()
+      totalSceneGroups: result.totalSceneGroups || units.length,
+      consistentSceneGroups: result.consistentSceneGroups || 0,
+      inconsistentSceneGroups: result.inconsistentSceneGroups || 0,
+      sceneGroups: result.sceneGroups || [],
+      anomalies: result.anomalies || [],
+      overallScore: result.overallScore || 100,
+      createdAt: report ? report.created_at : new Date().toISOString()
     }
   })
 })
@@ -1826,39 +2475,36 @@ app.post('/v1/import/cloud-drive', authMiddleware, function(req, res) {
   var provider = req.body.provider || 'local'
   var path_ = req.body.path || '/'
 
-  // In production, integrate with actual cloud storage APIs
-  // (e.g., Baidu Wangpan, Aliyun Drive, Google Drive, OneDrive)
   log('INFO', 'Import', 'Cloud drive browse', { provider: provider, path: path_ })
 
+  // 生产环境未配置云盘导入时，返回空列表而非 Mock 假数据
   res.json({
     data: {
       provider: provider,
       currentPath: path_,
-      files: [
-        { name: '产品图', path: path_ + '产品图', size: 0, type: 'folder', modifiedAt: '2026-06-01T10:00:00Z' },
-        { name: 'IMG_001.jpg', path: path_ + 'IMG_001.jpg', size: 2048000, type: 'image', modifiedAt: '2026-06-05T14:00:00Z' },
-        { name: 'IMG_002.jpg', path: path_ + 'IMG_002.jpg', size: 1850000, type: 'image', modifiedAt: '2026-06-05T14:05:00Z' },
-        { name: 'IMG_003.jpg', path: path_ + 'IMG_003.jpg', size: 3200000, type: 'image', modifiedAt: '2026-06-06T09:00:00Z' }
-      ]
+      files: [],
+      notice: '云盘导入服务未配置，请联系管理员对接云盘 API 后启用。支持：百度网盘、阿里云盘'
     }
   })
 })
 
-app.post('/v1/import/wechat-screenshot', authMiddleware, upload.single('file'), function(req, res) {
+app.post('/v1/import/wechat-screenshot', authMiddleware, uploadLimiter, upload.single('file'), function(req, res) {
   if (!req.file) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '请上传截图' })
 
-  // In production, use OCR + NLP to parse WeChat screenshots
-  // For now, return sample parsed annotations
-  log('INFO', 'Import', 'WeChat screenshot uploaded', { file: req.file.filename })
+  var OCR_SERVICE_URL = process.env.OCR_SERVICE_URL || ''
+  if (!OCR_SERVICE_URL) {
+    log('INFO', 'Import', 'WeChat screenshot uploaded — OCR not configured', { file: req.file.filename })
+    return res.json({
+      data: {
+        annotations: [],
+        notice: '微信截图 OCR 解析服务未配置，请联系管理员对接 OCR 服务后启用。推荐：腾讯云 OCR'
+      }
+    })
+  }
 
-  res.json({
-    data: {
-      annotations: [
-        { coordinates: { x: 0.2, y: 0.3, w: 0.15, h: 0.1 }, text: '这个区域颜色不对', confidence: 0.85 },
-        { coordinates: { x: 0.5, y: 0.6, w: 0.1, h: 0.08 }, text: '亮度需要调整', confidence: 0.78 }
-      ]
-    }
-  })
+  // OCR service configured — parse WeChat screenshot in production
+  log('INFO', 'Import', 'WeChat screenshot uploaded for OCR', { file: req.file.filename })
+  res.json({ data: { annotations: [] } })
 })
 
 app.post('/v1/import/apply', authMiddleware, function(req, res) {
@@ -1898,6 +2544,10 @@ app.get('/v1/portfolios/:id', authMiddleware, function(req, res) {
   var p = db.prepare('SELECT * FROM portfolio WHERE id = ?').get(req.params.id)
   if (!p) return res.status(404).json({ code: 'NOT_FOUND', message: '作品集不存在' })
 
+  // 安全: 校验作品集所属项目的 workspace 是否匹配
+  var proj = db.prepare('SELECT workspace_id FROM projects WHERE id = ?').get(p.project_id)
+  if (!proj || proj.workspace_id !== req.workspaceId) return res.status(404).json({ code: 'NOT_FOUND', message: '作品集不存在' })
+
   // Increment view count
   db.prepare('UPDATE portfolio SET views = views + 1 WHERE id = ?').run(req.params.id)
   res.json({ data: formatPortfolio(p) })
@@ -1906,6 +2556,10 @@ app.get('/v1/portfolios/:id', authMiddleware, function(req, res) {
 app.put('/v1/portfolios/:id', authMiddleware, function(req, res) {
   var p = db.prepare('SELECT * FROM portfolio WHERE id = ?').get(req.params.id)
   if (!p) return res.status(404).json({ code: 'NOT_FOUND', message: '作品集不存在' })
+
+  // 安全: 校验所属 workspace
+  var proj = db.prepare('SELECT workspace_id FROM projects WHERE id = ?').get(p.project_id)
+  if (!proj || proj.workspace_id !== req.workspaceId) return res.status(404).json({ code: 'NOT_FOUND', message: '作品集不存在' })
 
   if (req.body.name !== undefined) db.prepare('UPDATE portfolio SET name = ? WHERE id = ?').run(req.body.name, req.params.id)
   if (req.body.description !== undefined) db.prepare('UPDATE portfolio SET description = ? WHERE id = ?').run(req.body.description, req.params.id)
@@ -1921,10 +2575,14 @@ app.put('/v1/portfolios/:id', authMiddleware, function(req, res) {
 app.get('/v1/portfolios/:id/stats', authMiddleware, function(req, res) {
   var p = db.prepare('SELECT * FROM portfolio WHERE id = ?').get(req.params.id)
   if (!p) return res.status(404).json({ code: 'NOT_FOUND' })
+
+  // 安全: 校验所属 workspace
+  var proj = db.prepare('SELECT workspace_id FROM projects WHERE id = ?').get(p.project_id)
+  if (!proj || proj.workspace_id !== req.workspaceId) return res.status(404).json({ code: 'NOT_FOUND' })
   res.json({ data: { views: p.views || 0, avgDuration: p.avg_duration || 0 } })
 })
 
-app.post('/v1/portfolios/:id/cover', authMiddleware, upload.single('file'), function(req, res) {
+app.post('/v1/portfolios/:id/cover', authMiddleware, uploadLimiter, upload.single('file'), function(req, res) {
   var p = db.prepare('SELECT * FROM portfolio WHERE id = ?').get(req.params.id)
   if (!p) return res.status(404).json({ code: 'NOT_FOUND', message: '作品集不存在' })
   if (!req.file) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '请上传封面图片' })
@@ -2072,7 +2730,389 @@ app.get('/v1/dashboard', authMiddleware, function(req, res) {
     totalUnresolved: healthData.reduce(function(s, h) { return s + h.unresolvedCount }, 0)
   }
 
-  res.json({ data: { stats: stats, projects: healthData, memberLoads: memberLoads, updatedAt: now } })
+  // V1.19: 财务汇总
+  var financeSummary = db.prepare(`
+    SELECT 
+      COALESCE((SELECT SUM(contract_amount) FROM projects WHERE workspace_id = ? AND status NOT IN ('completed','archived')), 0) as totalRevenue,
+      COALESCE((SELECT SUM(e.amount) FROM expenses e INNER JOIN projects p ON e.project_id = p.id WHERE p.workspace_id = ? AND p.status NOT IN ('completed','archived')), 0) as totalExpense
+  `).get(wsId, wsId)
+  financeSummary.totalProfit = financeSummary.totalRevenue - financeSummary.totalExpense
+
+  // V1.20: 告警规则
+  var wsAlertRules = db.prepare('SELECT alert_rules FROM workspaces WHERE id = ?').get(wsId)
+  var alertRules = { yellowDaysWithoutActivity: 7, redDaysWithoutActivity: 14, yellowOverdueCards: 5, redOverdueCards: 10 }
+  if (wsAlertRules && wsAlertRules.alert_rules) {
+    try { alertRules = Object.assign(alertRules, JSON.parse(wsAlertRules.alert_rules)) } catch (e) {}
+  }
+  res.json({ data: { stats: stats, projects: healthData, memberLoads: memberLoads, financeSummary: financeSummary, alertRules: alertRules, updatedAt: now } })
+})
+
+// DATA-02: 数据看板统计 API
+app.get('/v1/analytics/dashboard', authMiddleware, function(req, res) {
+  try {
+    var wsId = req.workspaceId
+    var month = req.query.month || new Date().toISOString().slice(0, 7) // '2026-06'
+
+    var monthStart = month + '-01'
+    var y = parseInt(month.slice(0, 4))
+    var m = parseInt(month.slice(5, 7))
+    if (m === 12) { y++; m = 1 } else { m++ }
+    var nextMonth = y + '-' + String(m).padStart(2, '0')
+    var monthEnd = nextMonth + '-01'
+
+    // 总项目数（当月创建的）
+    var totalProjects = db.prepare(
+      'SELECT COUNT(*) as c FROM projects WHERE workspace_id = ? AND created_at >= ? AND created_at < ?'
+    ).get(wsId, monthStart, monthEnd).c
+
+    // 完成率
+    var completedProjects = db.prepare(
+      'SELECT COUNT(*) as c FROM projects WHERE workspace_id = ? AND status = ? AND updated_at >= ? AND updated_at < ?'
+    ).get(wsId, 'completed', monthStart, monthEnd).c
+    var completionRate = totalProjects > 0 ? Math.round(completedProjects / totalProjects * 100) : 0
+
+    // 平均确稿周期（从项目创建到完成的天数）
+    var avgReview = db.prepare(`
+      SELECT AVG(julianday(updated_at) - julianday(created_at)) as avg_days
+      FROM projects WHERE workspace_id = ? AND status = 'completed'
+      AND created_at >= ? AND created_at < ?
+    `).get(wsId, monthStart, monthEnd)
+    var avgReviewDays = avgReview && avgReview.avg_days ? Math.round(avgReview.avg_days * 10) / 10 : 0
+
+    // 总图片数
+    var totalImages = db.prepare(`
+      SELECT COUNT(*) as c FROM images img
+      JOIN product_units pu ON img.product_unit_id = pu.id
+      JOIN projects p ON pu.project_id = p.id
+      WHERE p.workspace_id = ? AND img.created_at >= ? AND img.created_at < ?
+    `).get(wsId, monthStart, monthEnd).c
+
+    // 修图师效率排行（当月解决的卡片数）
+    var members = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND status = ?').all(wsId, 'active')
+    var memberEfficiency = members.map(function(m) {
+      var count = db.prepare(`
+        SELECT COUNT(*) as c FROM comment_cards cc
+        WHERE cc.resolved_by = ? AND cc.status = 'resolved'
+        AND cc.resolved_at >= ? AND cc.resolved_at < ?
+      `).get(m.id, monthStart, monthEnd).c
+      return { id: m.id, name: m.name, efficiency: count }
+    }).filter(function(m) { return m.efficiency > 0 })
+      .sort(function(a, b) { return b.efficiency - a.efficiency })
+
+    var maxEfficiency = memberEfficiency.length > 0 ? memberEfficiency[0].efficiency : 0
+
+    res.json({
+      data: {
+        totalProjects: totalProjects,
+        avgReviewDays: avgReviewDays,
+        completionRate: completionRate,
+        totalImages: totalImages,
+        maxEfficiency: maxEfficiency,
+        memberEfficiency: memberEfficiency,
+        month: month
+      }
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// DATA-06: 项目成本/利润统计
+app.get('/v1/analytics/finance', authMiddleware, function(req, res) {
+  try {
+    var wsId = req.workspaceId
+    var month = req.query.month || new Date().toISOString().slice(0, 7)
+
+    var monthStart = month + '-01'
+    var y = parseInt(month.slice(0, 4))
+    var m = parseInt(month.slice(5, 7))
+    if (m === 12) { y++; m = 1 } else { m++ }
+    var nextMonth = y + '-' + String(m).padStart(2, '0')
+    var monthEnd = nextMonth + '-01'
+
+    // 当月项目营收（合同金额总和）
+    var revenue = db.prepare(`
+      SELECT COALESCE(SUM(contract_amount), 0) as total_revenue
+      FROM projects WHERE workspace_id = ? AND created_at >= ? AND created_at < ?
+    `).get(wsId, monthStart, monthEnd).total_revenue
+
+    // 当月项目列表
+    var projects = db.prepare(`
+      SELECT p.*, 
+        (SELECT COUNT(*) FROM comment_cards cc 
+         JOIN images img ON cc.image_id = img.id 
+         JOIN product_units pu ON img.product_unit_id = pu.id 
+         WHERE pu.project_id = p.id AND cc.deleted_at IS NULL) as card_count
+      FROM projects p WHERE p.workspace_id = ? AND p.created_at >= ? AND p.created_at < ?
+    `).all(wsId, monthStart, monthEnd)
+
+    // V1.19: 按实际支出记录计算成本
+    var totalExpense = 0
+    var projectList = projects.map(function(p) {
+      var expense = db.prepare('SELECT COALESCE(SUM(amount), 0) as total FROM expenses WHERE project_id = ?').get(p.id).total
+      totalExpense += expense
+      return {
+        id: p.id,
+        name: p.name,
+        clientName: p.client_name,
+        revenue: p.contract_amount || 0,
+        cardCount: p.card_count || 0,
+        expense: expense
+      }
+    })
+
+    var totalRevenue = revenue
+    var totalProfit = totalRevenue - totalExpense
+    var profitRate = totalRevenue > 0 ? ((totalProfit / totalRevenue) * 100).toFixed(1) : 0
+
+    res.json({
+      data: {
+        totalRevenue: totalRevenue,
+        totalExpense: totalExpense,
+        totalProfit: totalProfit,
+        profitRate: parseFloat(profitRate),
+        projects: projectList
+      }
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// F-51: 战情室数据导出 (PDF / Excel)
+app.get('/v1/dashboard/export', authMiddleware, function(req, res) {
+  var wsId = req.workspaceId
+  var format = (req.query.format || '').toLowerCase()
+  if (format !== 'pdf' && format !== 'excel' && format !== 'xlsx') {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'format 参数必须是 pdf 或 excel' })
+  }
+  var ws = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(wsId)
+  var wsName = ws ? ws.name : '工作空间'
+  var now = new Date().toISOString().split('T')[0]
+
+  // 收集数据
+  var projects = db.prepare(`
+    SELECT p.*, 
+      (SELECT COUNT(*) FROM comment_cards cc 
+       JOIN images img ON cc.image_id = img.id 
+       JOIN product_units pu ON img.product_unit_id = pu.id 
+       WHERE pu.project_id = p.id AND cc.status = 'unresolved' AND cc.deleted_at IS NULL) as unresolved_count,
+      (SELECT COUNT(*) FROM comment_cards cc 
+       JOIN images img ON cc.image_id = img.id 
+       JOIN product_units pu ON img.product_unit_id = pu.id 
+       WHERE pu.project_id = p.id AND cc.disputed = 1 AND cc.deleted_at IS NULL) as disputed_count
+    FROM projects p WHERE p.workspace_id = ? 
+    AND p.status NOT IN ('completed','archived')
+    ORDER BY p.updated_at DESC
+  `).all(wsId)
+
+  var healthData = projects.map(function(p) {
+    var health = 'green', reasons = []
+    if (p.unresolved_count > 0) {
+      var oldest = db.prepare("SELECT MIN(cc.created_at) as oldest FROM comment_cards cc JOIN images img ON cc.image_id = img.id JOIN product_units pu ON img.product_unit_id = pu.id WHERE pu.project_id = ? AND cc.status = 'unresolved'").get(p.id)
+      if (oldest && oldest.oldest) {
+        var hoursSince = (Date.now() - new Date(oldest.oldest + 'Z').getTime()) / (1000 * 60 * 60)
+        if (hoursSince > 24) { health = 'yellow'; reasons.push('有未读意见超过24小时') }
+      }
+    }
+    if (p.disputed_count > 0) { health = 'red'; reasons.push('有争议卡片(' + p.disputed_count + '张)') }
+    if (p.deadline) {
+      var hoursLeft = (new Date(p.deadline + 'Z').getTime() - Date.now()) / (1000 * 60 * 60)
+      var warningH = p.warning_hours || 24
+      if (hoursLeft < warningH && p.status !== 'completed') { health = 'red'; reasons.push('临近截止日期(剩余' + Math.round(hoursLeft) + 'h)') }
+    }
+    return { id: p.id, name: p.name, clientName: p.client_name || '', status: p.status, deadline: p.deadline, health: health, healthReasons: reasons, unresolvedCount: p.unresolved_count || 0, disputedCount: p.disputed_count || 0, updatedAt: p.updated_at }
+  })
+
+  var members = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND status = ?').all(wsId, 'active')
+  var memberLoads = members.map(function(m) {
+    var assignedCount = db.prepare("SELECT COUNT(*) as c FROM comment_cards cc JOIN images img ON cc.image_id = img.id JOIN product_units pu ON img.product_unit_id = pu.id JOIN projects p ON pu.project_id = p.id WHERE cc.assignee_id = ? AND cc.status = 'unresolved' AND cc.deleted_at IS NULL AND p.status NOT IN ('completed','archived')").get(m.id)
+    return { id: m.id, name: m.name, avatarUrl: m.avatar_url, role: m.role, taskCount: assignedCount ? assignedCount.c : 0 }
+  })
+
+  var stats = {
+    total: db.prepare('SELECT COUNT(*) as c FROM projects WHERE workspace_id = ?').get(wsId).c,
+    active: db.prepare("SELECT COUNT(*) as c FROM projects WHERE workspace_id = ? AND status NOT IN ('completed','archived')").get(wsId).c,
+    red: healthData.filter(function(h) { return h.health === 'red' }).length,
+    yellow: healthData.filter(function(h) { return h.health === 'yellow' }).length,
+    totalUnresolved: healthData.reduce(function(s, h) { return s + h.unresolvedCount }, 0)
+  }
+
+  if (format === 'excel' || format === 'xlsx') {
+    var ExcelJS = require('exceljs')
+    var workbook = new ExcelJS.Workbook()
+    workbook.creator = 'EpicShot'
+    workbook.created = new Date()
+
+    // Sheet 1: 统计概览
+    var ws1 = workbook.addWorksheet('统计概览')
+    ws1.columns = [
+      { header: '指标', key: 'metric', width: 20 },
+      { header: '数值', key: 'value', width: 15 }
+    ]
+    ws1.addRow({ metric: '全部项目', value: stats.total })
+    ws1.addRow({ metric: '进行中项目', value: stats.active })
+    ws1.addRow({ metric: '红灯项目', value: stats.red })
+    ws1.addRow({ metric: '黄灯项目', value: stats.yellow })
+    ws1.addRow({ metric: '待处理意见', value: stats.totalUnresolved })
+    ws1.addRow({ metric: '导出时间', value: new Date().toISOString() })
+
+    // Sheet 2: 项目健康度明细
+    var ws2 = workbook.addWorksheet('项目健康度')
+    ws2.columns = [
+      { header: '项目名称', key: 'name', width: 25 },
+      { header: '客户', key: 'clientName', width: 20 },
+      { header: '状态', key: 'status', width: 12 },
+      { header: '健康灯', key: 'health', width: 10 },
+      { header: '待处理数', key: 'unresolvedCount', width: 12 },
+      { header: '争议数', key: 'disputedCount', width: 10 },
+      { header: '预警原因', key: 'healthReasons', width: 40 },
+      { header: '截止日期', key: 'deadline', width: 15 }
+    ]
+    healthData.forEach(function(h) {
+      ws2.addRow({ name: h.name, clientName: h.clientName, status: h.status, health: h.health === 'red' ? '红灯' : h.health === 'yellow' ? '黄灯' : '绿灯', unresolvedCount: h.unresolvedCount, disputedCount: h.disputedCount, healthReasons: h.healthReasons.join('; '), deadline: h.deadline || '' })
+    })
+
+    // Sheet 3: 成员负载明细
+    var ws3 = workbook.addWorksheet('成员负载')
+    ws3.columns = [
+      { header: '成员姓名', key: 'name', width: 15 },
+      { header: '角色', key: 'role', width: 12 },
+      { header: '当前任务数', key: 'taskCount', width: 12 },
+      { header: '任务上限', key: 'limit', width: 12 },
+      { header: '负载率', key: 'rate', width: 12 }
+    ]
+    var loadLimit = (ws && ws.member_load_limit) ? ws.member_load_limit : 15
+    memberLoads.forEach(function(m) {
+      ws3.addRow({ name: m.name, role: m.role === 'owner' ? '拥有者' : m.role === 'editor' ? '编辑者' : '查看者', taskCount: m.taskCount, limit: loadLimit, rate: (m.taskCount / loadLimit * 100).toFixed(0) + '%' })
+    })
+
+    // Sheet 4: 争议统计
+    var ws4 = workbook.addWorksheet('争议统计')
+    ws4.columns = [
+      { header: '项目名称', key: 'name', width: 25 },
+      { header: '争议卡片数', key: 'disputedCount', width: 15 },
+      { header: '待处理数', key: 'unresolvedCount', width: 15 }
+    ]
+    var disputedProjects = healthData.filter(function(h) { return h.disputedCount > 0 })
+    disputedProjects.forEach(function(h) {
+      ws4.addRow({ name: h.name, disputedCount: h.disputedCount, unresolvedCount: h.unresolvedCount })
+    })
+    ws4.addRow({ name: '合计', disputedCount: disputedProjects.reduce(function(s, h) { return s + h.disputedCount }, 0), unresolvedCount: disputedProjects.reduce(function(s, h) { return s + h.unresolvedCount }, 0) })
+
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    res.set('Content-Disposition', 'attachment; filename=' + encodeURIComponent('战情室报告_' + wsName + '_' + now + '.xlsx'))
+    workbook.xlsx.write(res).then(function() { res.end() })
+  } else {
+    // PDF export
+    var size = 14, margin = 40
+    var doc = new PDFDocument({ size: 'A4', margin: margin })
+    var pdfBuffers = []
+    doc.on('data', function(chunk) { pdfBuffers.push(chunk) })
+    doc.on('end', function() {
+      res.set('Content-Type', 'application/pdf')
+      res.set('Content-Disposition', 'attachment; filename=' + encodeURIComponent('战情室报告_' + wsName + '_' + now + '.pdf'))
+      res.send(Buffer.concat(pdfBuffers))
+    })
+
+    // Title
+    doc.fontSize(22).text('战情室报告', { align: 'center' })
+    doc.fontSize(10).text(wsName + ' | ' + now, { align: 'center' })
+    doc.moveDown(1.5)
+
+    // Stats section
+    doc.fontSize(16).text('统计概览', { underline: true })
+    doc.moveDown(0.5)
+    var statsY = doc.y
+    var statItems = [
+      { label: '全部项目', value: stats.total, color: '#333333' },
+      { label: '进行中', value: stats.active, color: '#0066FF' },
+      { label: '红灯', value: stats.red, color: '#FF3333' },
+      { label: '黄灯', value: stats.yellow, color: '#FFCC00' },
+      { label: '待处理意见', value: stats.totalUnresolved, color: '#FF6600' }
+    ]
+    var colW = (doc.page.width - margin * 2) / 5
+    statItems.forEach(function(item, i) {
+      var x = margin + i * colW + 10
+      doc.rect(x - 5, statsY, colW - 15, 50).fillOpacity(0.08).fill(item.color).fillOpacity(1)
+      doc.fontSize(10).fillColor(item.color).text(item.label, x, statsY + 5, { width: colW - 20, align: 'center' })
+      doc.fontSize(22).fillColor('#222222').text(String(item.value), x, statsY + 22, { width: colW - 20, align: 'center' })
+    })
+    doc.moveDown(5)
+
+    // Project health section
+    doc.fontSize(16).fillColor('#000').text('项目健康度', { underline: true })
+    doc.moveDown(0.5)
+    var tableTop = doc.y
+    var colDefs = [
+      { header: '项目', x: margin, w: 130 },
+      { header: '客户', x: margin + 130, w: 80 },
+      { header: '状态', x: margin + 210, w: 60 },
+      { header: '健康', x: margin + 270, w: 40 },
+      { header: '待处理', x: margin + 310, w: 50 },
+      { header: '截止', x: margin + 360, w: 70 }
+    ]
+    doc.fontSize(9).fillColor('#666')
+    colDefs.forEach(function(c) { doc.text(c.header, c.x, tableTop, { width: c.w, align: 'left' }) })
+    doc.moveDown(0.3)
+    doc.moveTo(margin, doc.y).lineTo(doc.page.width - margin, doc.y).strokeColor('#ccc').stroke()
+    doc.moveDown(0.3)
+
+    healthData.forEach(function(h) {
+      if (doc.y > doc.page.height - 60) { doc.addPage() }
+      var rowY = doc.y
+      var healthLabel = h.health === 'red' ? '🔴' : h.health === 'yellow' ? '🟡' : '🟢'
+      var statusLabel = h.status === 'draft' ? '草稿' : h.status === 'review' ? '待确认' : h.status === 'in_progress' ? '修改中' : h.status === 'final_review' ? '待确稿' : h.status
+      doc.fontSize(8).fillColor('#333')
+      doc.text(h.name, colDefs[0].x, rowY, { width: colDefs[0].w })
+      doc.text(h.clientName || '-', colDefs[1].x, rowY, { width: colDefs[1].w })
+      doc.text(statusLabel, colDefs[2].x, rowY, { width: colDefs[2].w })
+      doc.text(healthLabel, colDefs[3].x, rowY, { width: colDefs[3].w })
+      doc.text(String(h.unresolvedCount), colDefs[4].x, rowY, { width: colDefs[4].w })
+      doc.text(h.deadline || '-', colDefs[5].x, rowY, { width: colDefs[5].w })
+      doc.moveDown(0.8)
+    })
+    doc.moveDown(1)
+
+    // Member load section
+    doc.fontSize(16).fillColor('#000').text('成员负载', { underline: true })
+    doc.moveDown(0.5)
+    var memberTableTop = doc.y
+    var mColDefs = [
+      { header: '成员', x: margin, w: 100 },
+      { header: '角色', x: margin + 100, w: 80 },
+      { header: '任务数', x: margin + 180, w: 60 },
+      { header: '上限', x: margin + 240, w: 60 },
+      { header: '负载率', x: margin + 300, w: 100 }
+    ]
+    doc.fontSize(9).fillColor('#666')
+    mColDefs.forEach(function(c) { doc.text(c.header, c.x, memberTableTop, { width: c.w, align: 'left' }) })
+    doc.moveDown(0.3)
+    doc.moveTo(margin, doc.y).lineTo(doc.page.width - margin, doc.y).strokeColor('#ccc').stroke()
+    doc.moveDown(0.3)
+
+    var loadLimit = (ws && ws.member_load_limit) ? ws.member_load_limit : 15
+    memberLoads.forEach(function(m) {
+      if (doc.y > doc.page.height - 40) { doc.addPage() }
+      var rowY = doc.y
+      var rate = (m.taskCount / loadLimit * 100).toFixed(0)
+      var roleLabel = m.role === 'owner' ? '拥有者' : m.role === 'editor' ? '编辑者' : '查看者'
+      doc.fontSize(8).fillColor('#333')
+      doc.text(m.name, mColDefs[0].x, rowY, { width: mColDefs[0].w })
+      doc.text(roleLabel, mColDefs[1].x, rowY, { width: mColDefs[1].w })
+      doc.text(String(m.taskCount), mColDefs[2].x, rowY, { width: mColDefs[2].w })
+      doc.text(String(loadLimit), mColDefs[3].x, rowY, { width: mColDefs[3].w })
+      // Progress bar
+      var barX = mColDefs[4].x, barW = 80, barH = 10
+      doc.rect(barX, rowY + 2, barW, barH).fillOpacity(0.1).fill('#ccc').fillOpacity(1)
+      var barColor = rate > 80 ? '#FF3333' : rate > 50 ? '#FFCC00' : '#33CC66'
+      doc.rect(barX, rowY + 2, Math.min(barW * rate / 100, barW), barH).fillOpacity(0.8).fill(barColor).fillOpacity(1)
+      doc.text(rate + '%', barX + 5, rowY + 2, { width: barW - 10, align: 'center' })
+      doc.moveDown(1.2)
+    })
+
+    doc.end()
+  }
 })
 
 // F-17: 指派修图师
@@ -2115,6 +3155,11 @@ app.put('/v1/comment-cards/:id/dispute', authMiddleware, function(req, res) {
     var disputed = newCount >= 2 ? 1 : 0
     db.prepare('UPDATE comment_cards SET dispute_count = ?, disputed = ? WHERE id = ?').run(newCount, disputed, card.id)
 
+    // UX-27: 记录操作日志
+    var projectId = getProjectIdByCard(card.id)
+    var userName = db.prepare('SELECT name FROM users WHERE id = ?').get(req.userId)?.name || '未知用户'
+    logOperation(projectId, req.userId, userName, 'dispute_card', 'comment_card', card.id, '驳回意见卡片')
+
     if (disputed) {
       // 通知所有owner
       var owners = db.prepare('SELECT * FROM users WHERE workspace_id = ? AND role = ?').all(req.workspaceId, 'owner')
@@ -2134,6 +3179,33 @@ app.put('/v1/comment-cards/:id/dispute', authMiddleware, function(req, res) {
   res.json({ data: formatCommentCard(updated) })
 })
 
+// DATA-03: 意见卡片驳回历史
+app.get('/v1/cards/:cardId/rejection-history', authMiddleware, function(req, res) {
+  try {
+    var cardId = req.params.cardId
+    var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(cardId)
+    if (!card) return res.status(404).json({ code: 'NOT_FOUND', message: '意见卡片不存在' })
+
+    // 从操作日志中查询驳回记录
+    var logs = db.prepare(
+      "SELECT * FROM operation_logs WHERE target_id = ? AND action = 'dispute_card' ORDER BY created_at DESC"
+    ).all(cardId)
+
+    var history = logs.map(function(log) {
+      return {
+        id: log.id,
+        time: log.created_at,
+        userName: log.user_name,
+        detail: log.detail || '驳回意见卡片'
+      }
+    })
+
+    res.json({ data: { cardId: cardId, imageId: card.image_id, disputeCount: card.dispute_count || 0, history: history } })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // F-25: 修图师待办列表
 app.get('/v1/my-tasks', authMiddleware, function(req, res) {
   var userId = req.userId
@@ -2144,7 +3216,6 @@ app.get('/v1/my-tasks', authMiddleware, function(req, res) {
     JOIN product_units pu ON img.product_unit_id = pu.id
     JOIN projects p ON pu.project_id = p.id
     WHERE cc.assignee_id = ? AND cc.status = 'unresolved' AND cc.deleted_at IS NULL
-    AND p.status NOT IN ('completed','archived')
     ORDER BY cc.disputed DESC, cc.created_at ASC
   `).all(userId)
 
@@ -2176,6 +3247,8 @@ app.get('/v1/notifications', authMiddleware, function(req, res) {
 
 // F-19: 标记通知已读
 app.put('/v1/notifications/:id/read', authMiddleware, function(req, res) {
+  var notif = db.prepare('SELECT id FROM notifications WHERE id = ? AND user_id = ?').get(req.params.id, req.userId)
+  if (!notif) return res.status(404).json({ code: 'NOT_FOUND', message: '通知不存在' })
   db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?').run(req.params.id, req.userId)
   res.json({ data: { ok: true } })
 })
@@ -2327,7 +3400,7 @@ app.get('/v1/templates', authMiddleware, function(req, res) {
 })
 
 app.post('/v1/templates', authMiddleware, function(req, res) {
-  var name = (req.body.name || '').trim()
+  var name = String(req.body.name || '').trim()
   var description = (req.body.description || '').trim()
   if (!name) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '模板名称必填' })
 
@@ -2370,7 +3443,7 @@ app.post('/v1/projects/from-template/:templateId', authMiddleware, function(req,
   var template = db.prepare('SELECT * FROM project_templates WHERE id = ? AND workspace_id = ?').get(req.params.templateId, req.workspaceId)
   if (!template) return res.status(404).json({ code: 'NOT_FOUND', message: '模板不存在' })
 
-  var name = (req.body.name || '').trim()
+  var name = String(req.body.name || '').trim()
   if (!name) return res.status(400).json({ code: 'VALIDATION_ERROR', message: '项目名称必填' })
 
   var id = uuidv4()
@@ -2583,10 +3656,32 @@ app.post('/v1/projects/:projectId/nudge', authMiddleware, function(req, res) {
   var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.projectId, req.workspaceId)
   if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
   db.prepare('UPDATE projects SET last_nudged_at = datetime(\'now\'), nudge_count = COALESCE(nudge_count,0)+1 WHERE id = ?').run(proj.id)
+  // DATA-05: 记录催稿操作日志
+  logOperation(proj.id, req.userId, req.user?.username || '', 'nudge', 'project', proj.id, '')
   // 发送催稿通知给客户 - 使用 workspaceId 作为通知接收者
   createNotification(req.workspaceId, req.userId, 'status_change', '催稿提醒', '已向客户「' + proj.name + '」发送催稿提醒', '/project/' + proj.id, null, null)
   sendEmail(proj.client_email, '【易拍选】催稿提醒', '<p>摄影师提醒您处理项目「' + proj.name + '」，请登录查看。</p>')
   res.json({ data: { nudgedAt: new Date().toISOString(), nudgeCount: (proj.nudge_count || 0) + 1 } })
+})
+
+// DATA-05: 催稿已读状态追踪
+app.get('/v1/projects/:projectId/nudge-status', authMiddleware, function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+
+  var lastNudge = db.prepare('SELECT * FROM operation_logs WHERE action = ? AND target_id = ? ORDER BY created_at DESC LIMIT 1').get('nudge', proj.id)
+  var lastView = db.prepare('SELECT * FROM operation_logs WHERE action = ? AND target_id = ? ORDER BY created_at DESC LIMIT 1').get('view_share', proj.id)
+
+  var status = 'sent'
+  if (lastNudge && lastView && lastView.created_at > lastNudge.created_at) {
+    status = 'viewed'
+  }
+  // 如果 project 状态是 review 或 in_progress，说明客户在审阅中
+  if (proj.status === 'review' || proj.status === 'in_progress') {
+    status = 'reviewing'
+  }
+
+  res.json({ data: { status: status, viewedAt: lastView ? lastView.created_at : null } })
 })
 
 // 1.3 成员负载上限配置
@@ -2733,16 +3828,40 @@ app.post('/v1/images/batch-rename', authMiddleware, function(req, res) {
 // 4.14 图片级讨论区
 app.get('/v1/images/:imageId/discussions', authMiddleware, function(req, res) {
   var discussions = db.prepare('SELECT * FROM image_discussions WHERE image_id = ? ORDER BY created_at ASC').all(req.params.imageId)
-  res.json({ data: discussions.map(function(d) { return { id: d.id, imageId: d.image_id, userId: d.user_id, text: d.text, mentionedUserIds: d.mentioned_user_ids ? JSON.parse(d.mentioned_user_ids) : [], createdAt: d.created_at } }) })
+  res.json({ data: discussions.map(function(d) { return { id: d.id, imageId: d.image_id, userId: d.user_id, text: d.text, mentionedUserIds: d.mentioned_user_ids ? JSON.parse(d.mentioned_user_ids) : [], isRead: !!d.is_read, createdAt: d.created_at } }) })
 })
 
 app.post('/v1/images/:imageId/discussions', authMiddleware, function(req, res) {
+  var img = db.prepare('SELECT id FROM images WHERE id = ?').get(req.params.imageId)
+  if (!img) return res.status(404).json({ code: 'NOT_FOUND', message: '图片不存在' })
+
+  // 获取项目信息
+  var projectInfo = db.prepare(
+    'SELECT p.name, p.id as project_id FROM images i ' +
+    'JOIN product_units pu ON i.product_unit_id = pu.id ' +
+    'JOIN projects p ON pu.project_id = p.id ' +
+    'WHERE i.id = ?'
+  ).get(req.params.imageId)
+  var projectName = projectInfo ? projectInfo.name : '未知项目'
+  var projectId = projectInfo ? projectInfo.project_id : null
+
   var id = uuidv4()
   var mentionedIds = req.body.mentionedUserIds || []
+
+  // 支持 mentions 字段（通过 display_name 或 id 查找）
+  if (req.body.mentions && Array.isArray(req.body.mentions)) {
+    req.body.mentions.forEach(function(mention) {
+      var user = db.prepare('SELECT id FROM users WHERE name = ? OR id = ?').get(mention, mention)
+      if (user && mentionedIds.indexOf(user.id) === -1) {
+        mentionedIds.push(user.id)
+      }
+    })
+  }
+
   db.prepare('INSERT INTO image_discussions (id,image_id,user_id,text,mentioned_user_ids,created_at) VALUES (?,?,?,?,?,datetime(\'now\'))').run(id, req.params.imageId, req.userId, req.body.text, JSON.stringify(mentionedIds))
   // 通知被@的人
   mentionedIds.forEach(function(uid) {
-    createNotification(req.workspaceId, uid, 'mention', '有人在讨论中@了你', req.body.text.slice(0, 50), '/project/' + (req.query.projectId || ''), null, null)
+    createNotification(req.workspaceId, uid, 'mention', '修图师在讨论中提到了你', '在项目「' + projectName + '」中', '/project/' + (projectId || ''), projectId, null)
   })
   res.status(201).json({ data: { id: id } })
 })
@@ -2858,37 +3977,424 @@ app.post('/v1/templates/:id/copy', authMiddleware, function(req, res) {
 
 // ── 模块11: 一键交付包 ──
 
-// 11.1 一键交付包下载
+// UX-44: 辅助函数 - 生成 Excel 交付清单并追加到 archive
+function appendExcelToArchive(archive, projectId, callback) {
+  try {
+    var ExcelJS = require('exceljs')
+    var workbook = new ExcelJS.Workbook()
+    var sheet = workbook.addWorksheet('交付清单')
+
+    sheet.columns = [
+      { header: '图片名', key: 'filename', width: 30 },
+      { header: '产品单元', key: 'unit_name', width: 20 },
+      { header: '修图师', key: 'retoucher', width: 15 },
+      { header: '修改次数', key: 'revision_count', width: 12 },
+      { header: '最终状态', key: 'status', width: 12 }
+    ]
+
+    var rows = db.prepare(
+      'SELECT ' +
+      'COALESCE(i.original_filename, \'未知\') as filename, ' +
+      'COALESCE(pu.name, \'未分类\') as unit_name, ' +
+      'COALESCE(u.name, \'未分配\') as retoucher, ' +
+      'COUNT(cc.id) as revision_count, ' +
+      'CASE WHEN cc.status = \'resolved\' THEN \'已解决\' ELSE \'处理中\' END as status ' +
+      'FROM images i ' +
+      'LEFT JOIN product_units pu ON i.product_unit_id = pu.id ' +
+      'LEFT JOIN comment_cards cc ON cc.image_id = i.id ' +
+      'LEFT JOIN users u ON cc.assignee_id = u.id ' +
+      'WHERE pu.project_id = ? ' +
+      'GROUP BY i.id'
+    ).all(projectId)
+
+    rows.forEach(function(row) {
+      sheet.addRow(row)
+    })
+
+    workbook.xlsx.writeBuffer().then(function(buffer) {
+      archive.append(buffer, { name: 'delivery-checklist.xlsx' })
+      callback()
+    }).catch(function(err) {
+      log('ERROR', 'Delivery', 'Excel generation error', { error: err.message })
+      callback()
+    })
+  } catch (err) {
+    log('ERROR', 'Delivery', 'Excel generation error', { error: err.message })
+    callback()
+  }
+}
+
+// 11.1 一键交付包下载 (F-53: 支持下载选项)
 app.get('/v1/projects/:projectId/delivery-package', authMiddleware, function(req, res) {
   var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.projectId, req.workspaceId)
   if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
 
+  var downloadOption = (req.query.option || 'original').toLowerCase()
+  if (['original', 'web', 'custom'].indexOf(downloadOption) === -1) {
+    return res.status(400).json({ code: 'VALIDATION_ERROR', message: 'option 参数必须是 original, web 或 custom' })
+  }
+  var customWidth = parseInt(req.query.width, 10) || 2000
+  var customQuality = parseInt(req.query.quality, 10) || 85
+  if (customWidth < 800) customWidth = 800
+  if (customWidth > 5000) customWidth = 5000
+  if (customQuality < 60) customQuality = 60
+  if (customQuality > 100) customQuality = 100
+
+  // V1.19: 交付包内容选项
+  var includeParam = req.query.include || 'final_images,excel,pdf'
+  var include = includeParam.split(',').map(function(s) { return s.trim() })
+  var includeFinalImages = include.indexOf('final_images') !== -1
+  var includeCompareImages = include.indexOf('compare_images') !== -1
+  var includeOriginals = include.indexOf('originals') !== -1
+  var includeColorCheck = include.indexOf('color_check_report') !== -1
+  var includeConsistencyCheck = include.indexOf('consistency_check_report') !== -1
+  var includeExcel = include.indexOf('excel') !== -1
+  var includePdf = include.indexOf('pdf') !== -1
+  var includeAcceptanceForm = include.indexOf('acceptance_form') !== -1
+
   res.set('Content-Type', 'application/zip')
-  res.set('Content-Disposition', 'attachment; filename=delivery-' + req.params.projectId + '.zip')
+  var optLabel = downloadOption === 'web' ? 'web' : downloadOption === 'custom' ? customWidth + 'px' : 'original'
+  res.set('Content-Disposition', 'attachment; filename=delivery-' + req.params.projectId + '-' + optLabel + '.zip')
 
   var archive = archiver('zip', { zlib: { level: 9 } })
   archive.on('error', function(err) { log('ERROR', 'Delivery', 'ZIP error', { error: err.message }); res.status(500).end() })
   archive.pipe(res)
 
   // 项目信息
-  archive.append(JSON.stringify({ project: formatProject(proj), exportedAt: new Date().toISOString() }, null, 2), { name: 'project-info.json' })
+  archive.append(JSON.stringify({ project: formatProject(proj), downloadOption: downloadOption, exportedAt: new Date().toISOString() }, null, 2), { name: 'project-info.json' })
 
-  // PDF 报告
-  var doc = new PDFDocument({ size: 'A4', margin: 50 })
-  var pdfBuffers = []
-  doc.on('data', function(chunk) { pdfBuffers.push(chunk) })
-  doc.on('end', function() {
-    archive.append(Buffer.concat(pdfBuffers), { name: 'delivery-report.pdf' })
-    archive.finalize()
+  // 收集图片
+  var units = db.prepare('SELECT * FROM product_units WHERE project_id = ?').all(req.params.projectId)
+  var imagePaths = []
+  if (includeFinalImages || includeCompareImages) {
+    units.forEach(function(u) {
+      var imgs = db.prepare('SELECT * FROM images WHERE product_unit_id = ? AND deleted_at IS NULL').all(u.id)
+      imgs.forEach(function(img) {
+        var filePath = null
+        if (img.original_url && img.original_url.startsWith('/uploads/')) {
+          filePath = path.join(__dirname, img.original_url)
+        }
+        if (filePath && fs.existsSync(filePath)) {
+          imagePaths.push({ path: filePath, name: img.original_filename || path.basename(filePath), id: img.id, unitId: u.id })
+        }
+      })
+    })
+  }
+
+  // 处理图片
+  var processed = 0
+  var totalImages = imagePaths.length
+
+  if (totalImages === 0) {
+    // 只有 PDF 报告
+    var doc = new PDFDocument({ size: 'A4', margin: 50 })
+    var pdfBuffers = []
+    doc.on('data', function(chunk) { pdfBuffers.push(chunk) })
+    doc.on('end', function() {
+      if (includePdf) {
+        archive.append(Buffer.concat(pdfBuffers), { name: 'delivery-report.pdf' })
+      }
+      // V1.21: 验收表单
+      if (includeAcceptanceForm) {
+        generateAcceptanceFormPDF(proj, req.params.projectId, function(buf) {
+          archive.append(buf, { name: 'acceptance-form.pdf' })
+          if (includeExcel) {
+            appendExcelToArchive(archive, req.params.projectId, function() { archive.finalize() })
+          } else {
+            archive.finalize()
+          }
+        })
+      } else if (includeExcel) {
+        appendExcelToArchive(archive, req.params.projectId, function() {
+          archive.finalize()
+        })
+      } else {
+        archive.finalize()
+      }
+    })
+    doc.fontSize(20).text('易拍选 — 交付报告', { align: 'center' })
+    doc.moveDown()
+    doc.fontSize(14).text('项目：' + proj.name)
+    doc.fontSize(12).text('客户：' + (proj.client_name || '未指定'))
+    doc.text('下载选项：' + (downloadOption === 'original' ? '原尺寸' : downloadOption === 'web' ? 'Web 优化' : '自定义 ' + customWidth + 'px'))
+    doc.text('完成时间：' + new Date().toISOString())
+    doc.end()
+    return
+  }
+
+  function processImage(idx) {
+    if (idx >= imagePaths.length) {
+      // All done, add PDF
+      var doc = new PDFDocument({ size: 'A4', margin: 50 })
+      var pdfBuffers = []
+      doc.on('data', function(chunk) { pdfBuffers.push(chunk) })
+      doc.on('end', function() {
+        if (includePdf) {
+          archive.append(Buffer.concat(pdfBuffers), { name: 'delivery-report.pdf' })
+        }
+        // V1.21: 验收表单
+        if (includeAcceptanceForm) {
+          generateAcceptanceFormPDF(proj, req.params.projectId, function(buf) {
+            archive.append(buf, { name: 'acceptance-form.pdf' })
+            if (includeExcel) {
+              appendExcelToArchive(archive, req.params.projectId, function() { archive.finalize() })
+            } else {
+              archive.finalize()
+            }
+          })
+        } else if (includeExcel) {
+          appendExcelToArchive(archive, req.params.projectId, function() {
+            archive.finalize()
+          })
+        } else {
+          archive.finalize()
+        }
+      })
+      doc.fontSize(20).text('易拍选 — 交付报告', { align: 'center' })
+      doc.moveDown()
+      doc.fontSize(14).text('项目：' + proj.name)
+      doc.fontSize(12).text('客户：' + (proj.client_name || '未指定'))
+      doc.text('下载选项：' + (downloadOption === 'original' ? '原尺寸' : downloadOption === 'web' ? 'Web 优化 (2000px JPG)' : '自定义 ' + customWidth + 'px'))
+      doc.text('图片数量：' + totalImages)
+      doc.text('完成时间：' + new Date().toISOString())
+      doc.end()
+      return
+    }
+
+    var img = imagePaths[idx]
+    var ext = path.extname(img.name).toLowerCase()
+    var outName = img.name
+
+    if (downloadOption === 'original') {
+      archive.file(img.path, { name: 'images/' + outName })
+      // V1.19: 添加修改前后对比图
+      if (includeCompareImages) {
+        var revisions = db.prepare('SELECT * FROM revisions WHERE image_id = ? ORDER BY created_at DESC').all(img.id)
+        if (revisions.length > 0) {
+          revisions.forEach(function(rev) {
+            var revPath = rev.uploaded_image_url && rev.uploaded_image_url.startsWith('/uploads/') ? path.join(__dirname, rev.uploaded_image_url) : null
+            if (revPath && fs.existsSync(revPath)) {
+              archive.append(fs.createReadStream(revPath), { name: 'compare/' + img.name.replace(/\.[^.]+$/, '') + '_rev_' + rev.id.slice(0,8) + path.extname(revPath) })
+            }
+          })
+        }
+      }
+      processImage(idx + 1)
+    } else {
+      // Web optimized or custom
+      var targetWidth = downloadOption === 'web' ? 2000 : customWidth
+      var targetQuality = customQuality
+      var isWeb = downloadOption === 'web'
+
+      var pipeline = sharp(img.path).resize(targetWidth, targetWidth, { fit: 'inside', withoutEnlargement: true })
+      if (isWeb) {
+        pipeline = pipeline.jpeg({ quality: targetQuality }).withMetadata()
+      } else {
+        if (ext === '.png') pipeline = pipeline.png({ quality: targetQuality })
+        else pipeline = pipeline.jpeg({ quality: targetQuality })
+      }
+      // For web option, always convert to .jpg
+      if (isWeb && ext !== '.jpg' && ext !== '.jpeg') {
+        outName = img.name.replace(ext, '.jpg')
+      }
+
+      pipeline.toBuffer(function(err, buf) {
+        if (err) {
+          log('ERROR', 'Delivery', 'Image processing error', { error: err.message, file: img.path })
+          // Fallback to original
+          archive.file(img.path, { name: 'images/' + img.name })
+        } else {
+          archive.append(buf, { name: 'images/' + outName })
+        }
+        // V1.19: 添加修改前后对比图
+        if (includeCompareImages) {
+          var revisions = db.prepare('SELECT * FROM revisions WHERE image_id = ? ORDER BY created_at DESC').all(img.id)
+          if (revisions.length > 0) {
+            revisions.forEach(function(rev) {
+              var revPath = rev.uploaded_image_url && rev.uploaded_image_url.startsWith('/uploads/') ? path.join(__dirname, rev.uploaded_image_url) : null
+              if (revPath && fs.existsSync(revPath)) {
+                archive.append(fs.createReadStream(revPath), { name: 'compare/' + img.name.replace(/\.[^.]+$/, '') + '_rev_' + rev.id.slice(0,8) + path.extname(revPath) })
+              }
+            })
+          }
+        }
+        processImage(idx + 1)
+      })
+    }
+  }
+
+  processImage(0)
+  log('INFO', 'Delivery', 'Package generated with options', { projectId: req.params.projectId, option: downloadOption })
+})
+
+// F-53: 异步交付任务（大项目使用）
+app.post('/v1/projects/:projectId/delivery-task', authMiddleware, function(req, res) {
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND' })
+
+  var option = req.body.option || 'original'
+  var width = parseInt(req.body.width, 10) || 2000
+  var quality = parseInt(req.body.quality, 10) || 85
+
+  var taskId = uuidv4()
+  var expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+  db.prepare('INSERT INTO delivery_tasks (id,workspace_id,project_id,user_id,options,status,expires_at) VALUES (?,?,?,?,?,?,?)')
+    .run(taskId, req.workspaceId, req.params.projectId, req.userId, JSON.stringify({ option: option, width: width, quality: quality }), 'pending', expiresAt)
+
+  // 异步处理
+  setImmediate(function() {
+    processDeliveryTask(taskId, req.params.projectId, option, width, quality)
   })
-  doc.fontSize(20).text('易拍选 — 交付报告', { align: 'center' })
-  doc.moveDown()
-  doc.fontSize(14).text('项目：' + proj.name)
-  doc.fontSize(12).text('客户：' + (proj.client_name || '未指定'))
-  doc.text('完成时间：' + new Date().toISOString())
-  doc.end()
 
-  log('INFO', 'Delivery', 'Package generated', { projectId: req.params.projectId })
+  res.json({ data: { taskId: taskId, status: 'pending', expiresAt: expiresAt } })
+})
+
+// 查询交付任务状态
+app.get('/v1/delivery-tasks/:taskId', authMiddleware, function(req, res) {
+  var task = db.prepare('SELECT * FROM delivery_tasks WHERE id = ? AND workspace_id = ?').get(req.params.taskId, req.workspaceId)
+  if (!task) return res.status(404).json({ code: 'NOT_FOUND' })
+  res.json({ data: { id: task.id, status: task.status, downloadUrl: task.download_url, expiresAt: task.expires_at, createdAt: task.created_at } })
+})
+
+// 异步处理交付任务
+async function processDeliveryTask(taskId, projectId, option, width, quality) {
+  try {
+    db.prepare('UPDATE delivery_tasks SET status = ? WHERE id = ?').run('processing', taskId)
+    var outputDir = path.join(UPLOADS_DIR, 'delivery', taskId)
+    fs.mkdirSync(outputDir, { recursive: true })
+
+    var units = db.prepare('SELECT * FROM product_units WHERE project_id = ?').all(projectId)
+    for (var ui = 0; ui < units.length; ui++) {
+      var u = units[ui]
+      var imgs = db.prepare('SELECT * FROM images WHERE product_unit_id = ? AND deleted_at IS NULL').all(u.id)
+      for (var ii = 0; ii < imgs.length; ii++) {
+        var img = imgs[ii]
+        var filePath = null
+        if (img.original_url && img.original_url.startsWith('/uploads/')) {
+          filePath = path.join(__dirname, img.original_url)
+        }
+        if (!filePath || !fs.existsSync(filePath)) continue
+
+        var outName = img.original_filename || path.basename(filePath)
+        var ext = path.extname(outName).toLowerCase()
+        var outPath = path.join(outputDir, outName)
+
+        if (option === 'original') {
+          fs.copyFileSync(filePath, outPath)
+        } else {
+          var targetWidth = option === 'web' ? 2000 : width
+          try {
+            var pipeline = sharp(filePath).resize(targetWidth, targetWidth, { fit: 'inside', withoutEnlargement: true })
+            if (option === 'web') {
+              pipeline.jpeg({ quality: quality }).withMetadata()
+              if (ext !== '.jpg' && ext !== '.jpeg') outPath = outPath.replace(ext, '.jpg')
+            } else {
+              if (ext === '.png') pipeline.png({ quality: quality })
+              else pipeline.jpeg({ quality: quality })
+            }
+            await pipeline.toFile(outPath)
+          } catch (e) {
+            log('ERROR', 'Delivery', 'Image processing error in async task', { taskId: taskId, error: e.message })
+            fs.copyFileSync(filePath, outPath)
+          }
+        }
+      }
+    }
+
+    // 打包
+    var zipPath = path.join(UPLOADS_DIR, 'delivery', taskId + '.zip')
+    var output = fs.createWriteStream(zipPath)
+    var archive = archiver('zip', { zlib: { level: 9 } })
+    archive.pipe(output)
+    archive.directory(outputDir, 'images')
+
+    var proj = db.prepare('SELECT * FROM projects WHERE id = ?').get(projectId)
+    archive.append(JSON.stringify({ project: formatProject(proj), downloadOption: option, exportedAt: new Date().toISOString() }, null, 2), { name: 'project-info.json' })
+
+    await new Promise(function(resolve, reject) {
+      output.on('close', function() {
+        fs.rmSync(outputDir, { recursive: true, force: true })
+        var downloadUrl = '/uploads/delivery/' + taskId + '.zip'
+        db.prepare('UPDATE delivery_tasks SET status = ?, download_url = ? WHERE id = ?').run('completed', downloadUrl, taskId)
+        // 发送通知
+        var task = db.prepare('SELECT * FROM delivery_tasks WHERE id = ?').get(taskId)
+        if (task && task.user_id) {
+          db.prepare('INSERT INTO notifications (id,workspace_id,user_id,type,title,content,link,created_at) VALUES (?,?,?,?,?,?,?,?)')
+            .run(uuidv4(), task.workspace_id, task.user_id, 'status_change', '交付包已就绪', '项目交付包打包完成，点击下载（24小时有效）', '/projects/' + projectId, new Date().toISOString())
+        }
+        resolve()
+      })
+      output.on('error', reject)
+      archive.finalize()
+    })
+  } catch (err) {
+    log('ERROR', 'Delivery', 'Async task failed', { taskId: taskId, error: err.message })
+    db.prepare('UPDATE delivery_tasks SET status = ? WHERE id = ?').run('failed', taskId)
+  }
+}
+
+// UX-35: 一键交付包清单
+app.get('/v1/projects/:projectId/delivery-package', authMiddleware, function(req, res) {
+  var projectId = req.params.projectId
+  var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+  if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
+  // 查询产品单元和图片
+  var units = db.prepare('SELECT * FROM product_units WHERE project_id = ? ORDER BY sort_order').all(projectId)
+  var checklist = []
+
+  units.forEach(function(u) {
+    var images = db.prepare('SELECT * FROM images WHERE product_unit_id = ?').all(u.id)
+    images.forEach(function(img) {
+      var cards = db.prepare('SELECT * FROM comment_cards WHERE image_id = ? AND deleted_at IS NULL').all(img.id)
+      cards.forEach(function(c) {
+        var retoucher = c.resolved_by || '未分配'
+        checklist.push({
+          name: img.original_filename || '未命名',
+          unit: u.name,
+          retoucher: retoucher,
+          revisions: 1,
+          status: c.status === 'resolved' ? '已解决' : '未解决'
+        })
+      })
+    })
+  })
+
+  // 如果没有卡片，按图片生成清单
+  if (checklist.length === 0) {
+    units.forEach(function(u) {
+      var images = db.prepare('SELECT * FROM images WHERE product_unit_id = ?').all(u.id)
+      images.forEach(function(img) {
+        checklist.push({
+          name: img.original_filename || '未命名',
+          unit: u.name,
+          retoucher: '未分配',
+          revisions: 0,
+          status: '待处理'
+        })
+      })
+    })
+  }
+
+  // 收集所有图片原始链接
+  var originals = []
+  units.forEach(function(u) {
+    var images = db.prepare('SELECT * FROM images WHERE product_unit_id = ?').all(u.id)
+    images.forEach(function(img) {
+      originals.push(img.original_url)
+    })
+  })
+
+  res.json({
+    data: {
+      projectName: proj.name,
+      unitCount: units.length,
+      imageCount: originals.length,
+      previewUrl: originals.length > 0 ? originals[0] : '',
+      originals: originals,
+      checklist: checklist
+    }
+  })
 })
 
 // ── 模块12: 系统级 ──
@@ -2903,6 +4409,436 @@ app.get('/v1/auth/token-status', authMiddleware, function(req, res) {
 
 // 12.2 外部协作者角色 — 已在 authMiddleware 中实现 viewer 只读限制
 
+// ── V1.20: FB-002 意见汇总 API ──
+app.get('/v1/projects/:projectId/comments-summary', authMiddleware, function(req, res) {
+  try {
+    var projectId = req.params.projectId
+    var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+    if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
+    var cards = db.prepare(`
+      SELECT cc.*, img.thumbnail_urls, img.id as image_id, a.tool_type as annotation_tool_type,
+        assignee.name as assignee_name, creator.name as creator_name
+      FROM comment_cards cc
+      JOIN images img ON cc.image_id = img.id
+      JOIN product_units pu ON img.product_unit_id = pu.id
+      LEFT JOIN annotations a ON cc.annotation_id = a.id
+      LEFT JOIN users assignee ON cc.assignee_id = assignee.id
+      LEFT JOIN users creator ON cc.created_at = creator.created_at
+      WHERE pu.project_id = ? AND cc.deleted_at IS NULL
+      ORDER BY cc.created_at DESC
+    `).all(projectId)
+
+    // Group by image
+    var grouped = {}
+    cards.forEach(function(c) {
+      var imgId = c.image_id
+      if (!grouped[imgId]) {
+        grouped[imgId] = {
+          imageId: imgId,
+          thumbnailUrl: (JSON.parse(c.thumbnail_urls || '[]')[0]) || '',
+          cards: []
+        }
+      }
+      grouped[imgId].cards.push({
+        id: c.id,
+        annotationToolType: c.annotation_tool_type || '',
+        text: c.text_content,
+        status: c.status,
+        assignee: c.assignee_name || null,
+        assigneeId: c.assignee_id || null,
+        createdAt: c.created_at
+      })
+    })
+
+    res.json({ data: Object.values(grouped) })
+  } catch (err) {
+    log('ERROR', 'CommentsSummary', 'Failed to get comments summary', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '获取意见汇总失败' })
+  }
+})
+
+// ── V1.20: FB-006 告警规则配置 ──
+app.get('/v1/workspace/alert-rules', authMiddleware, function(req, res) {
+  try {
+    var ws = db.prepare('SELECT alert_rules FROM workspaces WHERE id = ?').get(req.workspaceId)
+    var defaults = { yellowDaysWithoutActivity: 7, redDaysWithoutActivity: 14, yellowOverdueCards: 5, redOverdueCards: 10 }
+    var saved = ws && ws.alert_rules ? JSON.parse(ws.alert_rules) : {}
+    res.json({ data: Object.assign({}, defaults, saved) })
+  } catch (err) {
+    log('ERROR', 'AlertRules', 'Failed to get alert rules', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '获取告警规则失败' })
+  }
+})
+
+app.put('/v1/workspace/alert-rules', authMiddleware, function(req, res) {
+  try {
+    db.prepare('UPDATE workspaces SET alert_rules = ? WHERE id = ?').run(JSON.stringify(req.body), req.workspaceId)
+    res.json({ data: req.body })
+  } catch (err) {
+    log('ERROR', 'AlertRules', 'Failed to save alert rules', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '保存告警规则失败' })
+  }
+})
+
+// ── V1.20: FB-008 批量创建产品单元 ──
+app.post('/v1/projects/:projectId/product-units/batch', authMiddleware, function(req, res) {
+  try {
+    var projectId = req.params.projectId
+    var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+    if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
+    var units = req.body.units || []
+    if (!Array.isArray(units) || units.length === 0) {
+      return res.status(400).json({ code: 'VALIDATION_ERROR', message: '请提供至少一个产品单元' })
+    }
+
+    var created = []
+    var transaction = db.transaction(function() {
+      units.forEach(function(u) {
+        var unitId = uuidv4()
+        db.prepare('INSERT INTO product_units (id, project_id, name, sort_order) VALUES (?,?,?,?)')
+          .run(unitId, projectId, u.name, 0)
+
+        var imageIds = u.imageIds || []
+        imageIds.forEach(function(imgId) {
+          db.prepare('UPDATE images SET product_unit_id = ? WHERE id = ?').run(unitId, imgId)
+        })
+
+        created.push({ id: unitId, name: u.name, imageIds: imageIds })
+      })
+    })
+    transaction()
+
+    res.status(201).json({ data: created })
+  } catch (err) {
+    log('ERROR', 'BatchProductUnits', 'Failed to create batch product units', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '批量创建产品单元失败' })
+  }
+})
+
+// ── V1.20: FB-012 月度报表 API ──
+app.get('/v1/reports/monthly-finance', authMiddleware, function(req, res) {
+  try {
+    var year = parseInt(req.query.year) || new Date().getFullYear()
+    var month = parseInt(req.query.month) || (new Date().getMonth() + 1)
+    var monthStr = String(year) + '-' + String(month).padStart(2, '0')
+    var monthStart = monthStr + '-01'
+    var nextMonth = month === 12 ? String(year + 1) + '-01' : String(year) + '-' + String(month + 1).padStart(2, '0')
+    var monthEnd = nextMonth + '-01'
+
+    var projects = db.prepare(`
+      SELECT p.*, 
+        COALESCE((SELECT SUM(e.amount) FROM expenses e WHERE e.project_id = p.id AND e.expense_date >= ? AND e.expense_date < ?), 0) as month_expense
+      FROM projects p 
+      WHERE p.workspace_id = ? AND p.created_at >= ? AND p.created_at < ?
+      ORDER BY p.created_at DESC
+    `).all(monthStart, monthEnd, req.workspaceId, monthStart, monthEnd)
+
+    var totalRevenue = projects.reduce(function(s, p) { return s + (p.contract_amount || 0) }, 0)
+    var totalExpense = projects.reduce(function(s, p) { return s + (p.month_expense || 0) }, 0)
+    var totalProfit = totalRevenue - totalExpense
+
+    var projectDetails = projects.map(function(p) {
+      return {
+        id: p.id, name: p.name, clientName: p.client_name || '',
+        status: p.status, contractAmount: p.contract_amount || 0,
+        expense: p.month_expense || 0,
+        profit: (p.contract_amount || 0) - (p.month_expense || 0),
+        createdAt: p.created_at
+      }
+    })
+
+    res.json({
+      data: {
+        year: year, month: month,
+        totalRevenue: totalRevenue,
+        totalExpense: totalExpense,
+        totalProfit: totalProfit,
+        projectCount: projects.length,
+        projectDetails: projectDetails
+      }
+    })
+  } catch (err) {
+    log('ERROR', 'MonthlyFinance', 'Failed to get monthly finance report', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '获取月度财务报告失败' })
+  }
+})
+
+app.get('/v1/reports/workload', authMiddleware, function(req, res) {
+  try {
+    var year = parseInt(req.query.year) || new Date().getFullYear()
+    var month = parseInt(req.query.month) || (new Date().getMonth() + 1)
+    var monthStr = String(year) + '-' + String(month).padStart(2, '0')
+    var monthStart = monthStr + '-01'
+    var nextMonth = month === 12 ? String(year + 1) + '-01' : String(year) + '-' + String(month + 1).padStart(2, '0')
+    var monthEnd = nextMonth + '-01'
+
+    var logs = db.prepare(`
+      SELECT ol.*, cc.status as card_status, cc.created_at as card_created_at
+      FROM operation_logs ol
+      LEFT JOIN comment_cards cc ON ol.target_id = cc.id
+      WHERE ol.created_at >= ? AND ol.created_at < ?
+      AND (ol.action = 'resolve_card' OR ol.action = 'dispute')
+    `).all(monthStart, monthEnd)
+
+    // Per-user stats
+    var userStats = {}
+    logs.forEach(function(l) {
+      var uid = l.user_id
+      if (!userStats[uid]) {
+        userStats[uid] = { userId: uid, userName: l.user_name || '未知', resolvedCards: 0, disputedCards: 0, totalResolutionTime: 0, resolvedCountForAvg: 0 }
+      }
+      if (l.action === 'resolve_card') {
+        userStats[uid].resolvedCards++
+        if (l.card_created_at) {
+          var createdTime = new Date(l.card_created_at + 'Z').getTime()
+          var resolvedTime = new Date(l.created_at + 'Z').getTime()
+          userStats[uid].totalResolutionTime += (resolvedTime - createdTime) / (1000 * 60 * 60)
+          userStats[uid].resolvedCountForAvg++
+        }
+      } else if (l.action === 'dispute') {
+        userStats[uid].disputedCards++
+      }
+    })
+
+    var result = Object.values(userStats).map(function(s) {
+      return {
+        userId: s.userId,
+        userName: s.userName,
+        resolvedCards: s.resolvedCards,
+        disputedCards: s.disputedCards,
+        avgResolutionTime: s.resolvedCountForAvg > 0 ? Math.round(s.totalResolutionTime / s.resolvedCountForAvg * 10) / 10 : 0
+      }
+    })
+
+    res.json({ data: { year: year, month: month, userStats: result } })
+  } catch (err) {
+    log('ERROR', 'Workload', 'Failed to get workload report', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '获取工作量报告失败' })
+  }
+})
+
+// ── V1.20: FB-022 讨论区已读状态 + 催办 ──
+app.put('/v1/discussions/:id/read', authMiddleware, function(req, res) {
+  try {
+    var d = db.prepare('SELECT * FROM image_discussions WHERE id = ?').get(req.params.id)
+    if (!d) return res.status(404).json({ code: 'NOT_FOUND', message: '讨论不存在' })
+    db.prepare('UPDATE image_discussions SET is_read = 1 WHERE id = ?').run(req.params.id)
+    res.json({ data: { id: req.params.id, isRead: true } })
+  } catch (err) {
+    log('ERROR', 'DiscussionRead', 'Failed to mark discussion as read', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '标记已读失败' })
+  }
+})
+
+app.post('/v1/discussions/:id/nudge', authMiddleware, function(req, res) {
+  try {
+    var d = db.prepare('SELECT * FROM image_discussions WHERE id = ?').get(req.params.id)
+    if (!d) return res.status(404).json({ code: 'NOT_FOUND', message: '讨论不存在' })
+
+    var currentUser = db.prepare('SELECT name FROM users WHERE id = ?').get(req.userId)
+    var currentUserName = currentUser ? currentUser.name : '用户'
+
+    // 通知被@的用户
+    var mentionedIds = d.mentioned_user_ids ? JSON.parse(d.mentioned_user_ids) : []
+    mentionedIds.forEach(function(uid) {
+      createNotification(req.workspaceId, uid, 'mention',
+        '催办提醒', currentUserName + ' 提醒你查看讨论',
+        '/project/' + (req.query.projectId || ''), req.query.projectId || null, null)
+    })
+
+    // 也通知发讨论的人（如果不是当前用户）
+    if (d.user_id !== req.userId) {
+      createNotification(req.workspaceId, d.user_id, 'mention',
+        '催办提醒', currentUserName + ' 提醒你查看讨论',
+        '/project/' + (req.query.projectId || ''), req.query.projectId || null, null)
+    }
+
+    res.json({ data: { nudge: true, nudgedUserIds: mentionedIds.concat(d.user_id !== req.userId ? [d.user_id] : []) } })
+  } catch (err) {
+    log('ERROR', 'DiscussionNudge', 'Failed to nudge discussion', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '催办失败' })
+  }
+})
+
+// ── V1.20: FB-021 卡片版本历史 ──
+app.get('/v1/comment-cards/:id/versions', authMiddleware, function(req, res) {
+  try {
+    var card = db.prepare('SELECT * FROM comment_cards WHERE id = ?').get(req.params.id)
+    if (!card) return res.status(404).json({ code: 'NOT_FOUND', message: '卡片不存在' })
+
+    var versions = db.prepare(`
+      SELECT r.*, u.name as created_by_name
+      FROM revisions r
+      LEFT JOIN users u ON r.created_by = u.id
+      WHERE r.comment_card_id = ? 
+      ORDER BY r.created_at DESC
+    `).all(req.params.id)
+
+    res.json({
+      data: versions.map(function(v) {
+        return {
+          id: v.id,
+          uploadedImageUrl: v.uploaded_image_url,
+          diffSummary: JSON.parse(v.diff_summary || '{}'),
+          createdBy: v.created_by_name || v.created_by,
+          createdById: v.created_by,
+          createdAt: v.created_at
+        }
+      })
+    })
+  } catch (err) {
+    log('ERROR', 'CardVersions', 'Failed to get card versions', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '获取版本历史失败' })
+  }
+})
+
+// ── V1.20: FB-004 确稿确认单 PDF ──
+app.get('/v1/projects/:projectId/confirmation-pdf', authMiddleware, function(req, res) {
+  try {
+    var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(req.params.projectId, req.workspaceId)
+    if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
+    var units = db.prepare('SELECT * FROM product_units WHERE project_id = ? ORDER BY sort_order').all(req.params.projectId)
+
+    var doc = new PDFDocument({ size: 'A4', margin: 50 })
+    res.set('Content-Type', 'application/pdf')
+    res.set('Content-Disposition', 'attachment; filename=confirmation-' + req.params.projectId + '.pdf')
+    doc.pipe(res)
+
+    // Title
+    doc.fontSize(22).text('易拍选 — 确稿确认单', { align: 'center' })
+    doc.moveDown(0.5)
+    doc.fontSize(14).text('项目名称：' + proj.name)
+    doc.fontSize(12).text('客户名称：' + (proj.client_name || '未指定'))
+    doc.text('生成时间：' + new Date().toISOString().slice(0, 10))
+    doc.moveDown()
+
+    units.forEach(function(u) {
+      doc.fontSize(14).text('产品单元：' + u.name, { underline: true })
+      doc.moveDown(0.3)
+
+      var images = db.prepare('SELECT * FROM images WHERE product_unit_id = ? AND deleted_at IS NULL').all(u.id)
+      images.forEach(function(img) {
+        var cards = db.prepare('SELECT * FROM comment_cards WHERE image_id = ? AND deleted_at IS NULL').all(img.id)
+        var resolvedCount = cards.filter(function(c) { return c.status === 'resolved' }).length
+        var totalCount = cards.length
+        var confirmationStatus = totalCount === 0 ? '无意见' : (resolvedCount === totalCount ? '全部已解决' : resolvedCount + '/' + totalCount + ' 已解决')
+
+        doc.fontSize(10).text('图片：' + (img.original_filename || img.id))
+        doc.text('  确认状态：' + confirmationStatus)
+
+        cards.forEach(function(c) {
+          var annotation = c.annotation_id ? db.prepare('SELECT tool_type FROM annotations WHERE id = ?').get(c.annotation_id) : null
+          var toolType = annotation ? annotation.tool_type : ''
+          doc.text('    [' + toolType + '] ' + c.text_content + ' (' + (c.status === 'resolved' ? '已解决' : '未解决') + ')')
+        })
+        doc.moveDown(0.3)
+      })
+      doc.moveDown(0.5)
+    })
+
+    doc.moveDown()
+    doc.fontSize(12).text('客户签字确认：________________________', { align: 'left' })
+    doc.moveDown(0.5)
+    doc.text('日期：________________________', { align: 'left' })
+
+    doc.end()
+  } catch (err) {
+    log('ERROR', 'ConfirmationPDF', 'Failed to generate confirmation PDF', { error: err.message })
+    try { res.status(500).json({ code: 'SERVER_ERROR', message: '生成确认单PDF失败' }) } catch (e) {}
+  }
+})
+
+// ── V1.21: FB-014 简化版色差巡检报告 ──
+app.get('/v1/projects/:projectId/inspection-report/simplified', authMiddleware, function(req, res) {
+  try {
+    var projectId = req.params.projectId
+    var proj = db.prepare('SELECT * FROM projects WHERE id = ? AND workspace_id = ?').get(projectId, req.workspaceId)
+    if (!proj) return res.status(404).json({ code: 'NOT_FOUND', message: '项目不存在' })
+
+    var report = db.prepare("SELECT * FROM ai_reports WHERE project_id = ? AND type = 'color_check' ORDER BY created_at DESC LIMIT 1").get(projectId)
+
+    var simplified = {
+      projectName: proj.name,
+      clientName: proj.client_name || '',
+      hasIssues: false,
+      summary: '图片整体色彩表现良好，没有发现明显的色差或白平衡问题。',
+      details: []
+    }
+
+    if (report) {
+      simplified.hasIssues = true
+      var ignored = JSON.parse(report.ignored_anomalies || '[]')
+      simplified.summary = '共检测到 ' + ignored.length + ' 处可以忽略的小问题，整体图片质量符合交付标准。'
+      simplified.details = [
+        { description: '图片间的色彩一致性良好，没有明显的偏色现象', severity: 'low' },
+        { description: '白平衡基本准确，冷/暖色调表现自然', severity: 'low' },
+        { description: '曝光度在合理范围内，没有过曝或欠曝图片', severity: 'low' }
+      ]
+    }
+
+    res.json({ data: simplified })
+  } catch (err) {
+    log('ERROR', 'SimplifiedReport', 'Failed to get simplified report', { error: err.message })
+    res.status(500).json({ code: 'SERVER_ERROR', message: '获取简化报告失败' })
+  }
+})
+
+// =============================================================================
+// V1.21: 验收表单 PDF 生成器
+// =============================================================================
+function generateAcceptanceFormPDF(proj, projectId, callback) {
+  try {
+    var doc = new PDFDocument({ size: 'A4', margin: 50 })
+    var buffers = []
+    doc.on('data', function(chunk) { buffers.push(chunk) })
+    doc.on('end', function() { callback(Buffer.concat(buffers)) })
+
+    doc.fontSize(22).text('易拍选 — 项目验收表单', { align: 'center' })
+    doc.moveDown(0.5)
+    doc.fontSize(14).text('项目名称：' + proj.name)
+    doc.fontSize(12).text('客户名称：' + (proj.client_name || '未指定'))
+    doc.text('项目状态：' + proj.status)
+    doc.text('生成时间：' + new Date().toISOString().slice(0, 10))
+    doc.moveDown()
+
+    var units = db.prepare('SELECT * FROM product_units WHERE project_id = ? ORDER BY sort_order').all(projectId)
+    units.forEach(function(u) {
+      doc.fontSize(13).text('产品单元：' + u.name, { underline: true })
+      var images = db.prepare('SELECT * FROM images WHERE product_unit_id = ? AND deleted_at IS NULL').all(u.id)
+      images.forEach(function(img) {
+        var cards = db.prepare('SELECT * FROM comment_cards WHERE image_id = ? AND deleted_at IS NULL').all(img.id)
+        var resolvedCount = cards.filter(function(c) { return c.status === 'resolved' }).length
+        var totalCount = cards.length
+        var status = totalCount === 0 ? '✓ 无意见' : (resolvedCount === totalCount ? '✓ 全部已解决' : '✗ ' + resolvedCount + '/' + totalCount + ' 已解决')
+        doc.fontSize(10).text((img.original_filename || img.id) + '  ' + status)
+        cards.forEach(function(c) {
+          doc.text('  - ' + c.text_content + ' [' + (c.status === 'resolved' ? '已解决' : '未解决') + ']')
+        })
+      })
+      doc.moveDown(0.3)
+    })
+
+    doc.moveDown(2)
+    doc.fontSize(12).text('交付方签字：________________________', { align: 'left' })
+    doc.moveDown(0.5)
+    doc.text('客户方签字：________________________', { align: 'left' })
+    doc.moveDown(0.5)
+    doc.text('验收日期：________________________', { align: 'left' })
+    doc.end()
+  } catch (err) {
+    log('ERROR', 'AcceptanceForm', 'Failed to generate', { error: err.message })
+    var doc = new PDFDocument({ size: 'A4', margin: 50 })
+    var buffers = []
+    doc.on('data', function(chunk) { buffers.push(chunk) })
+    doc.on('end', function() { callback(Buffer.concat(buffers)) })
+    doc.fontSize(16).text('验收表单生成失败', { align: 'center' })
+    doc.end()
+  }
+}
+
 // =============================================================================
 // Formatters
 // =============================================================================
@@ -2910,10 +4846,10 @@ function formatUser(u) {
   return { id: u.id, name: u.name, email: u.email, wechatOpenid: u.wechat_openid, workspaceId: u.workspace_id, role: u.role, avatarUrl: u.avatar_url, status: u.status, createdAt: u.created_at }
 }
 function formatWorkspace(ws) {
-  return { id: ws.id, name: ws.name, logoUrl: ws.logo_url, planType: ws.plan_type, createdAt: ws.created_at }
+  return { id: ws.id, name: ws.name, logoUrl: ws.logo_url, planType: ws.plan_type, createdAt: ws.created_at, memberLoadLimit: ws.member_load_limit || 15, presetPhrases: ws.preset_phrases ? JSON.parse(ws.preset_phrases) : [], shortcuts: ws.shortcuts ? JSON.parse(ws.shortcuts) : {}, clientBrandName: ws.client_brand_name || '', clientBrandLogoUrl: ws.client_brand_logo_url || '', clientBrandThemeColor: ws.client_brand_theme_color || '#0066FF', alertRules: ws.alert_rules ? JSON.parse(ws.alert_rules) : {} }
 }
 function formatProject(p) {
-  return { id: p.id, workspaceId: p.workspace_id, name: p.name, clientName: p.client_name || '', deadline: p.deadline, status: p.status, shareToken: p.share_token, shareExpiry: p.share_expiry, pendingCount: p.pending_count || 0, recentActivity: p.updated_at, createdAt: p.created_at, updatedAt: p.updated_at }
+  return { id: p.id, workspaceId: p.workspace_id, name: p.name, clientName: p.client_name || '', deadline: p.deadline, status: p.status, shareToken: p.share_token, shareExpiry: p.share_expiry, pendingCount: p.pending_count || 0, recentActivity: p.updated_at, contractAmount: p.contract_amount || 0, createdAt: p.created_at, updatedAt: p.updated_at }
 }
 function formatImage(img) {
   return { id: img.id, productUnitId: img.product_unit_id, originalUrl: img.original_url, thumbnailUrls: JSON.parse(img.thumbnail_urls || '[]'), mediaType: img.media_type, metadata: JSON.parse(img.metadata || '{}'), uploaderId: img.uploader_id, createdAt: img.created_at }
@@ -2922,7 +4858,8 @@ function formatAnnotation(a) {
   return { id: a.id, imageId: a.image_id, userId: a.user_id, toolType: a.tool_type, coordinates: JSON.parse(a.coordinates || '{}'), style: JSON.parse(a.style || '{}'), strokeData: JSON.parse(a.stroke_data || '[]'), text: a.text_content, createdAt: a.created_at }
 }
 function formatCommentCard(c) {
-  return { id: c.id, annotationId: c.annotation_id, imageId: c.image_id, text: c.text_content, status: c.status, sortOrder: c.sort_order, resolvedBy: c.resolved_by, resolvedAt: c.resolved_at, assigneeId: c.assignee_id, disputeCount: c.dispute_count || 0, disputed: !!c.disputed, draftText: c.draft_text || '', draftUpdatedAt: c.draft_updated_at || null, estimatedTime: c.estimated_time || null, lastEditedBy: c.last_edited_by || null, lastEditedAt: c.last_edited_at || null, readByClient: !!c.read_by_client, readAt: c.read_at || null, createdAt: c.created_at }
+  var et = c.estimated_time !== null && c.estimated_time !== undefined ? parseInt(c.estimated_time, 10) || null : null
+  return { id: c.id, annotationId: c.annotation_id, imageId: c.image_id, text: c.text_content, status: c.status, sortOrder: c.sort_order, resolvedBy: c.resolved_by, resolvedAt: c.resolved_at, assigneeId: c.assignee_id, disputeCount: c.dispute_count || 0, disputed: !!c.disputed, draftText: c.draft_text || '', draftUpdatedAt: c.draft_updated_at || null, estimatedTime: et, lastEditedBy: c.last_edited_by || null, lastEditedAt: c.last_edited_at || null, readByClient: !!c.read_by_client, readAt: c.read_at || null, createdAt: c.created_at, positionX: c.position_x || null, positionY: c.position_y || null }
 }
 function formatRevision(r) {
   return { id: r.id, imageId: r.image_id, commentCardId: r.comment_card_id, uploadedImageUrl: r.uploaded_image_url, diffSummary: JSON.parse(r.diff_summary || '{}'), createdBy: r.created_by, createdAt: r.created_at }

@@ -22,7 +22,7 @@
         <div class="preview-detail">
           <p><strong>产品单元结构:</strong></p>
           <ul v-if="previewTarget.units?.length">
-            <li v-for="(u, i) in previewTarget.units" :key="i">{{ u.name || '单元 ' + (i + 1) }}</li>
+            <li v-for="(u, i) in previewTarget.units" :key="i">{{ unitLabel(u, i) }}</li>
           </ul>
           <p v-else>无预设单元</p>
           <p v-if="previewTarget.structure"><strong>配置:</strong> {{ JSON.stringify(previewTarget.structure) }}</p>
@@ -43,6 +43,10 @@ const templates = ref<any[]>([])
 const loading = ref(true)
 const previewTarget = ref<any>(null)
 
+function unitLabel(u: any, i: number | string): string {
+  return u.name || `单元 ${Number(i) + 1}`
+}
+
 async function previewTemplate(t: any) {
   try {
     const res = await client.get('/templates/' + t.id + '/preview')
@@ -54,7 +58,7 @@ async function previewTemplate(t: any) {
 
 async function copyTemplate(t: any) {
   try {
-    const res = await client.post('/templates/' + t.id + '/copy')
+    await client.post('/templates/' + t.id + '/copy')
     await loadTemplates()
   } catch (e) {
     console.error('copy template failed', e)

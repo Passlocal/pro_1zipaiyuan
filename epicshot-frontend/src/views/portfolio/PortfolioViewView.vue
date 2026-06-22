@@ -99,7 +99,7 @@ const currentSlide = ref(0)
 const loading = ref(true)
 const error = ref(false)
 
-const galleryRef = ref<HTMLElement | null>(null)
+const galleryRef = ref<HTMLElement | null>(null); void galleryRef
 
 const coverBgStyle = computed(() => {
   if (portfolio.value?.coverUrl) {
@@ -363,5 +363,42 @@ onMounted(async () => {
   font-size: 16px;
   color: $color-text-secondary;
   background: $color-bg;
+}
+
+@media (max-width: 768px) {
+  .portfolio-view {
+    overflow-y: auto;
+  }
+
+  .portfolio-scroll {
+    scroll-snap-type: none;
+  }
+
+  .gallery-image {
+    max-width: 95%;
+    max-height: 60vh;
+  }
+
+  .gallery-desc {
+    font-size: 14px;
+    max-width: 90%;
+  }
+
+  .gallery-arrow {
+    font-size: 32px;
+    padding: 8px;
+
+    &--left { left: 4px; }
+    &--right { right: 4px; }
+  }
+
+  .contact-footer {
+    min-height: 50vh;
+    padding: 32px 20px;
+  }
+
+  .contact-text {
+    font-size: 14px;
+  }
 }
 </style>

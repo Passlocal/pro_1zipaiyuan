@@ -22,7 +22,7 @@ const routes: RouteRecordRaw[] = [
         path: '',
         name: 'WarRoom',
         component: () => import('@/views/dashboard/WarRoomView.vue'),
-        meta: { requiresAuth: true }
+        meta: { requiresAuth: true, ownerOnly: true }
       },
       {
         path: 'projects',
@@ -40,6 +40,12 @@ const routes: RouteRecordRaw[] = [
         path: 'workspace',
         name: 'Workspace',
         component: () => import('@/views/workspace/WorkspaceView.vue'),
+        meta: { requiresAuth: true, ownerOnly: true }
+      },
+      {
+        path: 'reports',
+        name: 'Reports',
+        component: () => import('@/views/reports/ReportsView.vue'),
         meta: { requiresAuth: true }
       },
       {
@@ -112,6 +118,16 @@ router.beforeEach((to, _from, next) => {
 
   if (to.meta.guest && auth.isLoggedIn) {
     return next('/')
+  }
+
+  // DS-01: Role-based redirect for root path
+  if (to.path === '/' && auth.isLoggedIn && auth.isEditor) {
+    return next('/my-tasks')
+  }
+
+  // DS-01: Block owner-only routes for editors
+  if (to.meta.ownerOnly && auth.isLoggedIn && !auth.isOwner) {
+    return next('/my-tasks')
   }
 
   next()

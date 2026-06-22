@@ -61,7 +61,7 @@ export const portfolioApi = {
   get: (id: string) =>
     client.get<ApiResponse<Portfolio>>(`/portfolios/${id}`),
 
-  update: (id: string, data: { name?: string; description?: string; coverUrl?: string; images?: PortfolioImage[]; contactInfo?: string; clientName?: string }) =>
+  update: (id: string, data: { name?: string; description?: string; coverUrl?: string; images?: PortfolioImage[]; contactInfo?: string; clientName?: string; isPublished?: boolean }) =>
     client.put<ApiResponse<Portfolio>>(`/portfolios/${id}`, data),
 
   getStats: (id: string) =>

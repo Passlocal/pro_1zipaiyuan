@@ -1,7 +1,11 @@
 import { ref, onMounted, onUnmounted } from 'vue'
 import type { WSMessage, OnlineUser } from '@/types/models'
 
-const WS_BASE = import.meta.env.VITE_WS_URL || 'wss://api.epicshot.com/v1/ws'
+// 生产环境通过 VITE_WS_URL 注入，开发环境自动使用当前域名
+const WS_BASE = import.meta.env.VITE_WS_URL
+  || (typeof window !== 'undefined' && window.location.hostname === 'localhost'
+    ? `ws://${window.location.hostname}:3000/v1/ws`
+    : `wss://${window.location.host}/v1/ws`)
 
 export function useWebSocket(projectId: string) {
   const ws = ref<WebSocket | null>(null)

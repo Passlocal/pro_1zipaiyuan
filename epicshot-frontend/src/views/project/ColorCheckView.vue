@@ -1,11 +1,15 @@
 <template>
-  <div class="color-check-page">
+  <div class="color-check-page" :class="{ 'cb-mode': colorblindMode }">
     <div class="check-header">
       <div class="header-left">
-        <button class="btn-back" @click="router.back()">
-          <span>← 返回</span>
-        </button>
-        <h1 class="page-title">色差巡检</h1>
+        <!-- NAV-02: 面包屑导航 -->
+        <nav class="breadcrumb-nav">
+          <router-link to="/projects" class="breadcrumb-link">项目看板</router-link>
+          <span class="breadcrumb-sep">›</span>
+          <router-link :to="`/project/${projectId}`" class="breadcrumb-link">项目详情</router-link>
+          <span class="breadcrumb-sep">›</span>
+          <span class="breadcrumb-current">色差巡检</span>
+        </nav>
       </div>
       <div class="header-center">
         <!-- F-22-1: 行业场景预设 -->
@@ -23,12 +27,16 @@
         </div>
       </div>
       <div class="header-actions">
+        <!-- DS-07: 色盲友好模式 -->
+        <button class="btn-cb-mode" :class="{ active: colorblindMode }" @click="colorblindMode = !colorblindMode" title="色盲友好模式">
+          👁 色盲模式
+        </button>
         <button class="btn-inspect" @click="runCheck" :disabled="checking">
           <span v-if="checking" class="spinner"></span>
           {{ checking ? '巡检中...' : '一键巡检' }}
         </button>
         <button class="btn-export" v-if="report" :disabled="exporting" @click="exportPdf">
-          导出PDF
+          打印
         </button>
       </div>
     </div>
@@ -44,12 +52,36 @@
     <!-- 空状态 -->
     <div v-if="!report && !checking && !checkError" class="empty-state">
       <span class="empty-icon">🔍</span>
-      <p>点击"一键巡检"开始分析色差</p>
+      <h3 class="empty-title">色差巡检</h3>
+      <p class="empty-desc">点击"一键巡检"开始分析色差，AI 将自动检测图片中的色彩偏差</p>
+      <div class="inspect-info">
+        <button class="inspect-info-toggle" @click="showInspectInfo = !showInspectInfo">
+          {{ showInspectInfo ? '收起' : '▼' }} 巡检能发现什么？
+        </button>
+        <div v-if="showInspectInfo" class="inspect-info-content">
+          <div class="inspect-item">
+            <span class="inspect-item-icon">🌡</span>
+            <span><strong>色温偏差</strong>：图片偏冷或偏暖，影响品牌色一致性</span>
+          </div>
+          <div class="inspect-item">
+            <span class="inspect-item-icon">☀️</span>
+            <span><strong>亮度异常</strong>：曝光过度或不足，导致细节丢失</span>
+          </div>
+          <div class="inspect-item">
+            <span class="inspect-item-icon">🎨</span>
+            <span><strong>色彩偏移</strong>：品牌色失真，影响客户对产品的预期</span>
+          </div>
+          <div class="inspect-item">
+            <span class="inspect-item-icon">📐</span>
+            <span><strong>对比度问题</strong>：主体与背景区分度不足</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 错误状态 -->
     <div v-if="checkError && !checking" class="error-state">
-      <span class="error-icon">⚠️</span>
+      <AlertTriangle :size="24" aria-label="错误" />
       <p>巡检失败，请检查网络后重试</p>
       <button class="btn-retry" @click="checkError = false; runCheck()">重新巡检</button>
     </div>
@@ -98,6 +130,7 @@
           <div class="result-info">
             <div class="result-type-row">
               <span class="deviation-badge" :class="'deviation--' + item.deviationType">
+                <span class="deviation-icon">{{ deviationIcon(item) }}</span>
                 {{ deviationLabel(item.deviationType) }}
               </span>
               <span class="deviation-value" :class="item.deviationValue > 0 ? 'value-up' : 'value-down'">
@@ -111,6 +144,9 @@
             <button class="btn-preview-fix" @click="previewCorrection(item)">AI修正预览</button>
             <!-- F-22-2: 一键应用修正 -->
             <button class="btn-apply-fix" @click="applyCorrection(item)">应用修正</button>
+            <button class="btn-create-task" @click="createRetouchTask(item)" :disabled="item.taskCreated">
+              {{ item.taskCreated ? '✓ 已创建任务' : '创建修图任务' }}
+            </button>
             <button class="btn-ignore" @click="ignoreItem(item.imageId)">忽略</button>
           </div>
         </div>
@@ -136,6 +172,7 @@
             <div class="result-info">
               <div class="result-type-row">
                 <span class="deviation-badge" :class="'deviation--' + item.deviationType">
+                  <span class="deviation-icon">{{ deviationIcon(item) }}</span>
                   {{ deviationLabel(item.deviationType) }}
                 </span>
                 <span class="deviation-value" :class="item.deviationValue > 0 ? 'value-up' : 'value-down'">
@@ -182,15 +219,15 @@
 
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { aiApi } from '@/api/ai'
 import client from '@/api/client'
-import { useProjectStore } from '@/stores/project'
+import { useToast } from '@/composables/useToast'
 import type { ColorCheckReport, ColorCheckItem } from '@/types/models'
+import { AlertTriangle } from 'lucide-vue-next'
 
-const router = useRouter()
 const route = useRoute()
-const projectStore = useProjectStore()
+const toast = useToast()
 
 const projectId = computed(() => route.params.id as string)
 const checking = ref(false)
@@ -207,6 +244,29 @@ const appliedCorrections = ref<Set<string>>(new Set())
 const selectedIds = ref<Set<string>>(new Set())
 const applyingBatch = ref(false)
 const applyingAll = ref(false)
+
+// DS-07: 色盲友好模式
+const colorblindMode = ref(false)
+
+// EMO-06: 空状态巡检说明折叠
+const showInspectInfo = ref(false)
+
+// 偏差类型图标映射
+function deviationIcon(item: ColorCheckItem): string {
+  // 色温：偏暖/偏冷 → 火焰/雪花
+  if (item.deviationType === 'color_temp') {
+    return item.deviationValue > 0 ? '🔥' : '❄️'
+  }
+  // 亮度：偏亮/偏暗 → 太阳/月亮
+  if (item.deviationType === 'brightness') {
+    return item.deviationValue > 0 ? '☀️' : '🌑'
+  }
+  // 对比度 → 方块图案
+  if (item.deviationType === 'contrast') {
+    return item.deviationValue > 0 ? '▫️' : '▪️'
+  }
+  return '?'
+}
 
 const scenePresets = [
   { key: 'ecommerce_white', label: '电商白底图' },
@@ -302,6 +362,21 @@ async function applyAll() {
     console.error('[ColorCheck] Apply all failed:', e)
   } finally {
     applyingAll.value = false
+  }
+}
+
+async function createRetouchTask(item: ColorCheckItem) {
+  try {
+    await client.post('/v1/ai/color-check/create-task', {
+      imageId: item.imageId,
+      deviationType: item.deviationType,
+      deviationValue: item.deviationValue,
+      suggestion: item.suggestion || '',
+    })
+    item.taskCreated = true
+    toast.success('修图任务已创建，修图师将收到通知')
+  } catch (e) {
+    toast.error('创建失败，请重试')
   }
 }
 
@@ -523,8 +598,52 @@ onUnmounted(() => {
     font-size: 48px;
   }
 
-  p {
-    font-size: 15px;
+  .empty-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: $color-text;
+    margin: 0;
+  }
+
+  .empty-desc {
+    font-size: 14px;
+    margin: 0;
+    color: $color-text-secondary;
+  }
+}
+
+.inspect-info {
+  margin-top: 16px;
+  text-align: left;
+  max-width: 400px;
+}
+
+.inspect-info-toggle {
+  font-size: 13px;
+  color: $color-primary;
+  cursor: pointer;
+  padding: 4px 0;
+  &:hover { text-decoration: underline; }
+}
+
+.inspect-info-content {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inspect-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  font-size: 13px;
+  color: $color-text-secondary;
+  line-height: 1.5;
+
+  .inspect-item-icon {
+    flex-shrink: 0;
+    font-size: 16px;
   }
 }
 
@@ -694,10 +813,78 @@ onUnmounted(() => {
   font-weight: 500;
   border-radius: 20px;
   color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 
   &.deviation--color_temp { background: #ff8c00; }
   &.deviation--brightness { background: #1a73e8; }
   &.deviation--contrast { background: #8e24aa; }
+}
+
+// DS-07: 偏差图标
+.deviation-icon {
+  font-size: 12px;
+  line-height: 1;
+}
+
+// DS-07: 色盲友好模式按钮
+.btn-cb-mode {
+  padding: 4px 10px;
+  font-size: 12px;
+  color: $color-text-secondary;
+  border: 1px solid $color-border;
+  border-radius: $radius-sm;
+  transition: all 0.15s;
+  white-space: nowrap;
+
+  &:hover {
+    background: $color-surface-hover;
+    color: $color-text;
+  }
+
+  &.active {
+    background: rgba($color-primary, 0.08);
+    color: $color-primary;
+    border-color: $color-primary;
+  }
+}
+
+// DS-07: 色盲友好模式全局样式
+.cb-mode {
+  .deviation-badge {
+    border: 2px solid $color-text;
+    font-weight: 700;
+
+    &.deviation--color_temp {
+      background: repeating-linear-gradient(45deg, #ff8c00, #ff8c00 4px, #fff 4px, #fff 8px);
+      color: #333;
+      text-shadow: 0 0 2px #fff;
+    }
+    &.deviation--brightness {
+      background: repeating-linear-gradient(-45deg, #1a73e8, #1a73e8 4px, #fff 4px, #fff 8px);
+      color: #111;
+      text-shadow: 0 0 2px #fff;
+    }
+    &.deviation--contrast {
+      background: repeating-linear-gradient(0deg, #8e24aa, #8e24aa 4px, #fff 4px, #fff 8px);
+      color: #111;
+      text-shadow: 0 0 2px #fff;
+    }
+  }
+
+  .deviation-value {
+    font-weight: 700;
+
+    &.value-up {
+      color: #333;
+      border-bottom: 2px solid $color-error;
+    }
+    &.value-down {
+      color: #333;
+      border-bottom: 2px solid $color-primary;
+    }
+  }
 }
 
 .deviation-value {
@@ -830,6 +1017,23 @@ onUnmounted(() => {
   &:hover { background: #2d9249; }
 }
 
+.btn-create-task {
+  padding: 6px 14px;
+  background: #e8f0fe;
+  color: #1a73e8;
+  border: 1px solid #1a73e8;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  &:disabled {
+    background: #f0f0f0;
+    color: #999;
+    border-color: #e0e0e0;
+    cursor: default;
+  }
+}
+
 // 对比弹窗
 .compare-modal {
   width: 560px;
@@ -948,5 +1152,79 @@ onUnmounted(() => {
   background: $color-success;
   border-radius: $radius-md;
   &:hover { background: #2d9249; }
+}
+
+@media (max-width: 768px) {
+  .color-check-page {
+    .check-header {
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px 16px;
+    }
+
+    .header-center {
+      width: 100%;
+      justify-content: flex-start;
+    }
+
+    .header-actions {
+      width: 100%;
+      flex-wrap: wrap;
+    }
+  }
+
+  .progress-bar-wrap {
+    padding: 12px 16px;
+  }
+
+  .results-summary {
+    padding: 10px 16px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .batch-actions {
+    margin-left: 0;
+  }
+
+  .results-list {
+    padding: 12px 16px;
+    gap: 8px;
+  }
+
+  .result-item {
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .result-thumbnail {
+    width: 60px;
+    height: 48px;
+  }
+
+  .result-actions {
+    flex-direction: row;
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .compare-modal {
+    width: 94vw;
+    margin: 0 12px;
+  }
+
+  .compare-container {
+    height: 200px;
+  }
+
+  .scene-presets {
+    flex-wrap: wrap;
+  }
+
+  button, .btn {
+    min-height: 44px;
+  }
 }
 </style>

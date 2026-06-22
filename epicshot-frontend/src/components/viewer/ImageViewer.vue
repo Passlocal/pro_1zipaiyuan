@@ -27,24 +27,24 @@
     <!-- Fullscreen toggle button -->
     <button class="image-viewer__fullscreen-btn" @click.stop="viewer.toggleFullscreen()" :title="viewer.isFullscreen.value ? '退出全屏' : '全屏'" :aria-label="viewer.isFullscreen.value ? '退出全屏' : '全屏'">
       <svg v-if="viewer.isFullscreen.value" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="4 8 4 4 8 4"/>
-        <polyline points="20 8 20 4 16 4"/>
-        <polyline points="4 16 4 20 8 20"/>
-        <polyline points="20 16 20 20 16 20"/>
+        <polyline points="4 8 4 4 8 4"></polyline>
+        <polyline points="20 8 20 4 16 4"></polyline>
+        <polyline points="4 16 4 20 8 20"></polyline>
+        <polyline points="20 16 20 20 16 20"></polyline>
       </svg>
       <svg v-else viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="15 3 21 3 21 9"/>
-        <polyline points="9 21 3 21 3 15"/>
-        <polyline points="21 3 14 10"/>
-        <polyline points="3 21 10 14"/>
+        <polyline points="15 3 21 3 21 9"></polyline>
+        <polyline points="9 21 3 21 3 15"></polyline>
+        <polyline points="21 3 14 10"></polyline>
+        <polyline points="3 21 10 14"></polyline>
       </svg>
     </button>
 
     <!-- 4.3: 旋转按钮 -->
     <button class="image-viewer__rotate-btn" @click.stop="rotateImage" :title="'旋转 (' + (rotationAngle % 360) + '°)'" aria-label="旋转图片">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
-        <polyline points="23 4 23 10 17 10"/>
-        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+        <polyline points="23 4 23 10 17 10"></polyline>
+        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
       </svg>
     </button>
 
@@ -115,23 +115,20 @@
     </div>
 
     <!-- 4.1: 页码指示器 -->
-    <div v-if="totalCount > 0 && !loading" class="image-viewer__page-indicator">
-      <template v-if="!showPageInput">
-        <span class="page-label" @click="openPageInput">{{ currentIndex + 1 }} / {{ totalCount }}</span>
-      </template>
-      <template v-else>
-        <input
-          ref="pageInputRef"
-          v-model.number="pageInputValue"
-          class="page-input"
-          type="number"
-          :min="1"
-          :max="totalCount"
-          @keyup.enter="gotoPage"
-          @keyup.escape="closePageInput"
-          @blur="closePageInput"
-        />
-      </template>
+    <div v-if="(totalCount || 0) > 0 && !loading" class="image-viewer__page-indicator">
+      <span v-if="!showPageInput" class="page-label" @click="openPageInput">{{ (currentIndex || 0) + 1 }} / {{ totalCount || 0 }}</span>
+      <input
+        v-else
+        ref="pageInputRef"
+        v-model.number="pageInputValue"
+        class="page-input"
+        type="number"
+        :min="1"
+        :max="totalCount"
+        @keyup.enter="gotoPage"
+        @keyup.escape="closePageInput"
+        @blur="closePageInput"
+      />
     </div>
 
     <!-- Error state -->
@@ -147,7 +144,6 @@
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useImageViewer } from '@/composables/useImageViewer'
 import { useAnnotationStore } from '@/stores/annotation'
-import { useProgressiveImage } from '@/composables/useProgressiveImage'
 import { annotationApi } from '@/api/annotations'
 import type { Annotation, AnnotationCreateParams, AnnotationColor, AnnotationToolType, PenWidth, ArrowWidth, FontSize } from '@/types/models'
 
@@ -175,6 +171,9 @@ const emit = defineEmits<{
   (e: 'draft-restore', text: string): void
   (e: 'draft-ignore'): void
   (e: 'focus-next-card'): void
+  (e: 'submit'): void
+  (e: 'tool-change', tool: string): void
+  (e: 'close-modal'): void
 }>()
 
 const store = useAnnotationStore()
@@ -195,7 +194,6 @@ const displayWidth = ref(0)
 const displayHeight = ref(0)
 
 const isDrawing = ref(false)
-const spaceHeld = ref(false)
 const drawStartX = ref(0)
 const drawStartY = ref(0)
 const currentStroke: number[][] = []
@@ -276,13 +274,6 @@ const canvasStyle = computed(() => ({
   height: displayHeight.value ? `${displayHeight.value}px` : '0',
   transform: `translate(${viewer.offsetX.value}px, ${viewer.offsetY.value}px) scale(${viewer.scale.value}) rotate(${rotationAngle.value}deg)`,
   transformOrigin: '0 0'
-}))
-
-const textInputStyle = computed(() => ({
-  left: `${textInputPos.value.x * viewer.scale.value + viewer.offsetX.value}px`,
-  top: `${textInputPos.value.y * viewer.scale.value + viewer.offsetY.value - 14}px`,
-  fontSize: `${props.activeFontSize * viewer.scale.value}px`,
-  color: props.activeColor
 }))
 
 const textToolbarStyle = computed(() => ({
@@ -759,7 +750,7 @@ function onStageMouseMove(event: MouseEvent): void {
     const start = moveAnnotationStartCoords.value
     const ann = props.annotations.find(a => a.id === selectedAnnotationId.value)
     if (ann) {
-      const newCoords = { x: start.x + dx, y: start.y + dy }
+      const newCoords: Record<string, number> = { x: start.x + dx, y: start.y + dy }
       if (start.w !== undefined) newCoords['w'] = start.w
       if (start.h !== undefined) newCoords['h'] = start.h
       store.updateAnnotation(ann.id, { coordinates: newCoords as any })
@@ -832,13 +823,32 @@ function onStageMouseUp(event: MouseEvent): void {
 
 // ============ Tool Finalizers ============
 
+// FB-001: Path smoothing using moving average
+function smoothStroke(points: number[][], windowSize: number = 3): number[][] {
+  if (points.length <= windowSize) return points
+  const smoothed: number[][] = []
+  const half = Math.floor(windowSize / 2)
+  for (let i = 0; i < points.length; i++) {
+    let sumX = 0, sumY = 0, count = 0
+    for (let j = Math.max(0, i - half); j <= Math.min(points.length - 1, i + half); j++) {
+      sumX += points[j][0]
+      sumY += points[j][1]
+      count++
+    }
+    smoothed.push([sumX / count, sumY / count])
+  }
+  return smoothed
+}
+
 function finalizePenStroke(): void {
   if (currentStroke.length < 2) return
+  // FB-001: Smooth the stroke before saving
+  const smoothed = smoothStroke(currentStroke, 3)
   const params: AnnotationCreateParams = {
     toolType: 'pen',
     coordinates: { x: 0, y: 0 },
     style: { color: props.activeColor, width: props.activeWidth },
-    strokeData: [...currentStroke.map(p => [p[0], p[1]])]
+    strokeData: [...smoothed.map(p => [p[0], p[1]])]
   }
   const annotation = store.addAnnotation(params)
   emit('annotation-created', annotation)
@@ -1069,13 +1079,13 @@ function handleKeydown(event: KeyboardEvent): void {
     emit('fullscreen-toggle', viewer.isFullscreen.value)
   } else if (event.key === '+' || event.key === '=') {
     event.preventDefault()
-    viewer.zoomIn(1.25)
+    viewer.zoomTo(viewer.scale.value * 1.25)
   } else if (event.key === '-' || event.key === '_') {
     event.preventDefault()
-    viewer.zoomOut(1.25)
+    viewer.zoomTo(viewer.scale.value / 1.25)
   } else if (event.key === '0') {
     event.preventDefault()
-    viewer.resetView()
+    viewer.resetTransform()
   }
 }
 
@@ -1093,15 +1103,35 @@ function onGlobalKeydown(event: KeyboardEvent): void {
     }
   }
 
-  // F-21-1: A键切换画笔/箭头
-  if (event.key.toLowerCase() === 'a' && !event.ctrlKey && !event.metaKey) {
+  // UX-50: 工具切换快捷键 (A/P/R/T)
+  const toolKeys: Record<string, string> = { a: 'arrow', p: 'pen', r: 'rectangle', t: 'text' }
+  const key = event.key.toLowerCase()
+  if (toolKeys[key] && !event.ctrlKey && !event.metaKey) {
     const el = document.activeElement
     const tag = el ? el.tagName.toLowerCase() : ''
     if (tag !== 'input' && tag !== 'textarea' && !el?.getAttribute('contenteditable')) {
       event.preventDefault()
-      emit('tool-toggle')
+      emit('tool-change', toolKeys[key])
       return
     }
+  }
+
+  // UX-50: Ctrl/Cmd+Enter 提交当前卡片
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+    const el = document.activeElement
+    const tag = el ? el.tagName.toLowerCase() : ''
+    if (tag !== 'input' && tag !== 'textarea' && !el?.getAttribute('contenteditable')) {
+      event.preventDefault()
+      emit('submit')
+      return
+    }
+  }
+
+  // UX-50: Escape 关闭弹窗
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    emit('close-modal')
+    return
   }
 
   if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'z') {
@@ -1656,3 +1686,4 @@ function setupBlurPlaceholder() {
     animation: fadeIn 0.4s ease;
   }
 }
+</style>

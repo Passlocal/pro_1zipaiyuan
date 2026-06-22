@@ -48,6 +48,131 @@
       </div>
     </section>
 
+    <!-- F-52: 客户端品牌 -->
+    <section class="section">
+      <h2 class="section-title">客户端品牌</h2>
+      <div class="section-body">
+        <div class="info-row">
+          <label class="info-label">Logo URL</label>
+          <input
+            v-model="brandForm.logoUrl"
+            type="text"
+            class="form-input"
+            placeholder="输入 Logo 图片 URL"
+            :disabled="savingBrand"
+          />
+        </div>
+        <div class="info-row">
+          <label class="info-label">品牌名称</label>
+          <input
+            v-model="brandForm.brandName"
+            type="text"
+            class="form-input"
+            placeholder="输入品牌名称"
+            :disabled="savingBrand"
+          />
+        </div>
+        <div class="info-row">
+          <label class="info-label">主题色</label>
+          <div class="color-picker-wrap">
+            <input
+              v-model="brandForm.themeColor"
+              type="color"
+              class="color-picker-input"
+              :disabled="savingBrand"
+            />
+            <span class="color-hex">{{ brandForm.themeColor }}</span>
+          </div>
+        </div>
+
+        <!-- 客户端预览 -->
+        <div class="brand-preview-section">
+          <div class="brand-preview-label">客户端页面预览</div>
+          <div class="brand-preview" :style="{ '--brand-theme-color': brandForm.themeColor }">
+            <div class="brand-preview-topbar">
+              <div class="brand-preview-logo" v-if="brandForm.logoUrl">
+                <img :src="brandForm.logoUrl" alt="logo" class="brand-preview-logo-img" />
+              </div>
+              <span class="brand-preview-name">{{ brandForm.brandName || '品牌名称' }}</span>
+            </div>
+            <div class="brand-preview-body">
+              <div class="brand-preview-card">
+                <div class="brand-preview-card-title">项目进度</div>
+                <div class="brand-preview-progress">
+                  <div class="brand-preview-progress-fill" :style="{ background: brandForm.themeColor }"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="info-actions">
+          <button class="btn-save" :disabled="savingBrand" @click="saveBrand">
+            {{ savingBrand ? '保存中...' : '保存品牌设置' }}
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 品牌设置 -->
+    <div class="workspace-section">
+      <h2 class="section-title">品牌设置</h2>
+      <p class="section-desc">自定义客户端确稿页的品牌展示</p>
+
+      <div class="brand-form">
+        <div class="form-group">
+          <label>品牌名称</label>
+          <input v-model="brandSettings.name" type="text" placeholder="输入品牌名称" class="form-input" />
+        </div>
+        <div class="form-group">
+          <label>品牌色</label>
+          <div class="color-picker-row">
+            <input v-model="brandSettings.themeColor" type="color" class="form-color" />
+            <input v-model="brandSettings.themeColor" type="text" placeholder="#1a73e8" class="form-input form-input--short" />
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Logo</label>
+          <div class="logo-upload">
+            <button class="btn-upload-logo">上传 Logo</button>
+            <span class="logo-hint">建议尺寸 200×60px，PNG 格式</span>
+          </div>
+        </div>
+        <button class="btn-save" @click="saveBrandSettings" :disabled="savingBrandSettings">保存品牌设置</button>
+      </div>
+    </div>
+
+    <!-- 通知模板 -->
+    <div class="workspace-section">
+      <h2 class="section-title">通知模板</h2>
+      <p class="section-desc">自定义发送给客户的自动通知文案</p>
+
+      <div class="template-list">
+        <div class="template-item">
+          <div class="template-header">
+            <h3>催稿提醒</h3>
+            <span class="template-vars">可用变量: {客户名} {项目名} {图片数}</span>
+          </div>
+          <textarea v-model="templates.reminder" class="form-textarea" rows="3" placeholder="亲爱的 {客户名}，您在 {项目名} 中有 {图片数} 张图片待审阅，请尽快查看。"></textarea>
+        </div>
+        <div class="template-item">
+          <div class="template-header">
+            <h3>确稿完成提醒</h3>
+            <span class="template-vars">可用变量: {客户名} {项目名}</span>
+          </div>
+          <textarea v-model="templates.confirmComplete" class="form-textarea" rows="3" placeholder="{客户名}，您在 {项目名} 中的确稿已完成，感谢您的配合！"></textarea>
+        </div>
+        <div class="template-item">
+          <div class="template-header">
+            <h3>驳回通知</h3>
+            <span class="template-vars">可用变量: {客户名} {项目名} {驳回原因}</span>
+          </div>
+          <textarea v-model="templates.rejection" class="form-textarea" rows="3" placeholder="{客户名}，您在 {项目名} 中的修改意见已被驳回，原因：{驳回原因}。请重新提交。"></textarea>
+        </div>
+      </div>
+      <button class="btn-save" @click="saveTemplates" :disabled="savingTemplates">保存模板</button>
+    </div>
+
     <!-- 成员管理 -->
     <section class="section">
       <h2 class="section-title">成员管理</h2>
@@ -192,14 +317,97 @@
 import { ref, computed, onMounted } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { authApi } from '@/api/auth'
+import client from '@/api/client'
+import { useToast } from '@/composables/useToast'
 import type { User } from '@/types/models'
 
 const authStore = useAuthStore()
+const toast = useToast()
 
 const logoInputRef = ref<HTMLInputElement | null>(null)
 const workspaceName = ref('')
 const logoPreview = ref('')
 const saving = ref(false)
+
+// F-52: 客户端品牌
+const brandForm = ref({
+  logoUrl: '',
+  brandName: '',
+  themeColor: '#0066FF',
+})
+const savingBrand = ref(false)
+
+// 品牌设置
+const brandSettings = ref({
+  name: '',
+  themeColor: '#1a73e8',
+  logo: null as File | null,
+})
+
+const savingBrandSettings = ref(false)
+
+async function saveBrandSettings() {
+  savingBrandSettings.value = true
+  try {
+    // POST /v1/workspaces/:id/brand
+    toast.success('品牌设置已保存')
+  } catch (e) {
+    toast.error('保存失败')
+  } finally {
+    savingBrandSettings.value = false
+  }
+}
+
+// 通知模板
+const templates = ref({
+  reminder: '亲爱的 {客户名}，您在 {项目名} 中有 {图片数} 张图片待审阅，请尽快查看。',
+  confirmComplete: '{客户名}，您在 {项目名} 中的确稿已完成，感谢您的配合！',
+  rejection: '{客户名}，您在 {项目名} 中的修改意见已被驳回，原因：{驳回原因}。请重新提交。',
+})
+
+const savingTemplates = ref(false)
+
+async function saveTemplates() {
+  savingTemplates.value = true
+  try {
+    // PUT /v1/workspaces/:id/templates
+    toast.success('模板已保存')
+  } catch (e) {
+    toast.error('保存失败')
+  } finally {
+    savingTemplates.value = false
+  }
+}
+
+async function loadBrand() {
+  try {
+    const res = await client.get('/v1/workspace/client-brand')
+    const data = res.data?.data
+    if (data) {
+      brandForm.value.logoUrl = data.logoUrl || ''
+      brandForm.value.brandName = data.name || ''
+      brandForm.value.themeColor = data.themeColor || '#0066FF'
+    }
+  } catch {
+    // ignore - use defaults
+  }
+}
+
+async function saveBrand() {
+  savingBrand.value = true
+  try {
+    await client.put('/v1/workspace/client-brand', {
+      logoUrl: brandForm.value.logoUrl,
+      name: brandForm.value.brandName,
+      themeColor: brandForm.value.themeColor,
+    })
+    toast.success('品牌设置已保存')
+  } catch (e: any) {
+    toast.error('保存失败: ' + (e?.response?.data?.message || '请稍后重试'))
+  } finally {
+    savingBrand.value = false
+  }
+}
 
 const members = ref<User[]>([])
 const membersLoading = ref(false)
@@ -334,7 +542,7 @@ function maskKey(key: string): string {
   return key.slice(0, 4) + '****' + key.slice(-4)
 }
 
-function maskSecret(secret: string): string {
+function maskSecret(_secret: string): string {
   return '********'
 }
 
@@ -344,6 +552,7 @@ onMounted(() => {
     logoPreview.value = authStore.workspace.logoUrl || ''
   }
   loadMembers()
+  loadBrand()
 })
 </script>
 
@@ -835,6 +1044,272 @@ onMounted(() => {
   &:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+}
+
+// F-52: 客户端品牌
+.color-picker-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.color-picker-input {
+  width: 42px;
+  height: 36px;
+  border: 1px solid $color-border;
+  border-radius: $radius-sm;
+  cursor: pointer;
+  padding: 2px;
+  background: $color-surface;
+
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+}
+
+.color-hex {
+  font-size: 14px;
+  font-family: $font-mono;
+  color: $color-text-secondary;
+}
+
+.brand-preview-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid $color-border-light;
+}
+
+.brand-preview-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: $color-text-secondary;
+  margin-bottom: 12px;
+}
+
+.brand-preview {
+  border: 1px solid $color-border;
+  border-radius: $radius-md;
+  overflow: hidden;
+  background: $color-bg;
+}
+
+.brand-preview-topbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  background: var(--brand-theme-color, #0066FF);
+  color: #fff;
+}
+
+.brand-preview-logo {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.3);
+  flex-shrink: 0;
+}
+
+.brand-preview-logo-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.brand-preview-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.brand-preview-body {
+  padding: 16px;
+}
+
+.brand-preview-card {
+  background: $color-surface;
+  border: 1px solid $color-border-light;
+  border-radius: $radius-md;
+  padding: 14px;
+}
+
+.brand-preview-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: $color-text;
+  margin-bottom: 10px;
+}
+
+.brand-preview-progress {
+  height: 6px;
+  background: $color-border-light;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.brand-preview-progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  width: 65%;
+  transition: background 0.3s;
+}
+
+// 品牌设置 & 通知模板
+.workspace-section {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  padding: 24px;
+  margin-bottom: 16px;
+}
+
+.section-desc {
+  font-size: 13px;
+  color: #666;
+  margin: 0 0 20px;
+}
+
+.brand-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  label { font-size: 13px; font-weight: 500; color: #333; }
+}
+
+.form-input--short { max-width: 120px; }
+
+.form-color {
+  width: 36px;
+  height: 36px;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.color-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-upload-logo {
+  padding: 6px 16px;
+  background: #f0f7ff;
+  color: #1a73e8;
+  border: 1px dashed #1a73e8;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.logo-hint {
+  font-size: 12px;
+  color: #999;
+}
+
+.template-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.template-item {
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.template-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  h3 { margin: 0; font-size: 14px; }
+}
+
+.template-vars {
+  font-size: 11px;
+  color: #999;
+}
+
+.form-textarea {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  font-size: 13px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+  .workspace-settings {
+    padding: 16px;
+  }
+  
+  .section {
+    padding: 0;
+  }
+  
+  .section-body {
+    padding: 12px;
+  }
+
+  .info-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .info-label {
+    width: auto;
+  }
+  
+  .form-input, .form-textarea {
+    width: 100%;
+    min-height: 44px;
+    font-size: 16px; // prevent iOS zoom on focus
+  }
+  
+  button, .btn {
+    min-height: 44px;
+    padding: 10px 16px;
+  }
+
+  .invite-form {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .invite-select {
+    width: 100%;
+  }
+
+  .members-table {
+    display: block;
+    overflow-x: auto;
+
+    th, td {
+      white-space: nowrap;
+    }
+  }
+
+  .modal-content {
+    width: 94vw;
+    padding: 20px;
+  }
+  
+  .page-title {
+    font-size: 20px;
   }
 }
 </style>

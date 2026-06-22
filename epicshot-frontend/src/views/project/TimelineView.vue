@@ -2,20 +2,29 @@
   <div class="timeline-page">
     <div class="timeline-header">
       <div class="header-left">
-        <button class="btn-back" @click="router.back()">
-          <span>← 返回</span>
-        </button>
-        <h1 class="page-title">修改溯源时间轴</h1>
+        <!-- NAV-02: 面包屑导航 -->
+        <nav class="breadcrumb-nav">
+          <router-link to="/projects" class="breadcrumb-link">项目看板</router-link>
+          <span class="breadcrumb-sep">›</span>
+          <router-link :to="`/project/${projectId}`" class="breadcrumb-link">{{ projectStore.currentProject?.name || '项目' }}</router-link>
+          <span class="breadcrumb-sep">›</span>
+          <span class="breadcrumb-current">修改溯源时间轴</span>
+        </nav>
       </div>
-      <button class="btn-export" @click="handleExportPdf">导出PDF报告</button>
+      <button class="btn-export" @click="handleExportPdf">打印</button>
     </div>
 
-    <div v-if="projectStore.loading" class="loading-state">
-      <span class="loading-pulse">加载中...</span>
+    <div v-if="projectStore.loading" class="skeleton-timeline">
+      <div class="skeleton skeleton-timeline-header"></div>
+      <div v-for="i in 4" :key="'tl-' + i" class="skeleton-timeline-row" :class="{ 'skeleton-timeline-right': i % 2 === 0 }">
+        <div class="skeleton skeleton-timeline-dot"></div>
+        <div class="skeleton skeleton-timeline-card"></div>
+      </div>
     </div>
     <div v-else-if="projectStore.timeline.length === 0" class="empty-state">
       <span class="empty-icon">📅</span>
-      <p>暂无时间轴记录</p>
+      <h3 class="empty-title">暂无时间轴记录</h3>
+      <p class="empty-desc">项目进行中时，修改记录将自动汇聚于此</p>
     </div>
     <div v-else class="timeline-container">
 
@@ -121,8 +130,8 @@
             <p class="comparison-label">修改后</p>
             <div class="comparison-img-wrap">
               <img
-                v-if="selectedRevision?.uploadedImageUrl"
-                :src="selectedRevision.uploadedImageUrl"
+                v-if="selectedRevision?.revision?.uploadedImageUrl"
+                :src="selectedRevision.revision.uploadedImageUrl"
                 alt="修改后"
               />
               <div v-else class="comparison-placeholder">
@@ -137,8 +146,8 @@
         <div v-else-if="compareMode === 'slider'" class="compare-area">
           <div class="compare-container">
             <img
-              v-if="selectedRevision?.uploadedImageUrl"
-              :src="selectedRevision.uploadedImageUrl"
+              v-if="selectedRevision?.revision?.uploadedImageUrl"
+              :src="selectedRevision.revision.uploadedImageUrl"
               alt="修改后"
               class="compare-img compare-after"
             />
@@ -167,8 +176,8 @@
         <div v-else class="overlay-compare-area">
           <div class="overlay-compare-container">
             <img
-              v-if="selectedRevision?.uploadedImageUrl"
-              :src="selectedRevision.uploadedImageUrl"
+              v-if="selectedRevision?.revision?.uploadedImageUrl"
+              :src="selectedRevision.revision.uploadedImageUrl"
               alt="修改后"
               class="overlay-img overlay-after"
             />
@@ -180,11 +189,11 @@
             </div>
             <!-- 9.2 修改区域高亮 -->
             <div
-              v-if="showModifiedAreas && selectedRevision?.paramChanges"
+              v-if="showModifiedAreas && selectedRevision?.revision?.paramChanges"
               class="modified-area-overlay"
             >
               <div
-                v-for="(pc, pIdx) in selectedRevision.paramChanges"
+                v-for="(pc, pIdx) in selectedRevision.revision.paramChanges"
                 :key="'mod-' + pIdx"
                 class="modified-area-dash"
                 :style="{
@@ -211,11 +220,11 @@
           </div>
         </div>
 
-        <div v-if="selectedRevision?.paramChanges && selectedRevision.paramChanges.length > 0" class="param-changes">
+        <div v-if="selectedRevision?.revision?.paramChanges && selectedRevision.revision.paramChanges.length > 0" class="param-changes">
           <h3 class="param-title">参数变更</h3>
           <div class="param-list">
             <span
-              v-for="pc in selectedRevision.paramChanges"
+              v-for="pc in selectedRevision.revision.paramChanges"
               :key="pc.key"
               class="param-item"
             >
@@ -233,11 +242,10 @@
 
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { useProjectStore } from '@/stores/project'
 import type { TimelineNode } from '@/types/models'
 
-const router = useRouter()
 const route = useRoute()
 const projectStore = useProjectStore()
 
@@ -375,13 +383,51 @@ onMounted(() => {
   }
 }
 
-.loading-state {
-  flex: 1;
+.skeleton-timeline {
+  padding: 24px;
+  max-width: 800px;
+  margin: 0 auto;
+}
+
+.skeleton-timeline-header {
+  width: 200px;
+  height: 32px;
+  margin-bottom: 32px;
+}
+
+.skeleton-timeline-row {
   display: flex;
   align-items: center;
-  justify-content: center;
-  color: $color-text-secondary;
-  font-size: 14px;
+  margin-bottom: 24px;
+}
+
+.skeleton-timeline-right {
+  flex-direction: row-reverse;
+}
+
+.skeleton-timeline-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin: 0 16px;
+}
+
+.skeleton-timeline-card {
+  width: 280px;
+  height: 100px;
+}
+
+.skeleton {
+  background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
 }
 
 .empty-state {
@@ -919,6 +965,65 @@ onMounted(() => {
 
   &:hover {
     background: $color-border-light;
+  }
+}
+
+@media (max-width: 768px) {
+  .timeline-header {
+    flex-direction: column;
+    gap: 12px;
+    padding: 12px 16px;
+  }
+
+  .timeline-container {
+    padding: 20px 12px;
+  }
+
+  .timeline-line {
+    left: 20px;
+    transform: none;
+  }
+
+  .timeline-node {
+    flex-direction: column;
+    margin-bottom: 24px;
+  }
+
+  .node-left,
+  .node-right {
+    padding: 0 0 0 44px;
+    justify-content: flex-start;
+  }
+
+  .node-connector {
+    left: 20px;
+  }
+
+  .node-card {
+    max-width: 100%;
+  }
+
+  .comparison-modal {
+    width: 94vw;
+    padding: 20px;
+  }
+
+  .comparison-images {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .compare-container {
+    height: 200px;
+  }
+
+  .date-filter-bar {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  button, .btn {
+    min-height: 44px;
   }
 }
 </style>

@@ -61,6 +61,37 @@ input, textarea, select {
 .gap-12 { gap: 12px; }
 .gap-16 { gap: 16px; }
 
+// NAV-02: 面包屑导航全局样式
+.breadcrumb-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: $font-sm;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.breadcrumb-link {
+  color: $color-primary;
+  text-decoration: none;
+  flex-shrink: 0;
+  &:hover { text-decoration: underline; }
+}
+
+.breadcrumb-sep {
+  color: $color-text-muted;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.breadcrumb-current {
+  color: $color-text;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 // ============ 滚动条美化 ============
 ::-webkit-scrollbar {
   width: 6px;
@@ -97,6 +128,18 @@ input, textarea, select {
   0% { box-shadow: 0 0 0 0 rgba($color-primary, 0.5); }
   70% { box-shadow: 0 0 0 10px rgba($color-primary, 0); }
   100% { box-shadow: 0 0 0 0 rgba($color-primary, 0); }
+}
+
+// A11Y-08: 全局焦点指示器
+:focus-visible {
+  outline: 2px solid $color-primary;
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+// Reset focus for mouse users (no visible ring on click)
+:focus:not(:focus-visible) {
+  outline: none;
 }
 
 .fade-in { animation: fadeIn 0.2s ease; }

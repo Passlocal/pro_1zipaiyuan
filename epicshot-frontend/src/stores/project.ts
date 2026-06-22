@@ -32,8 +32,8 @@ export const useProjectStore = defineStore('project', () => {
     }
   }
 
-  async function createProject(data: { name: string; clientName?: string }, files?: File[]) {
-    const res = await projectApi.create(data, files)
+  async function createProject(data: { name: string; clientName?: string }, _files?: File[]) {
+    const res = await projectApi.create(data)
     projects.value.unshift(res.data.data)
     return res.data.data
   }

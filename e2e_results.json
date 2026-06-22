@@ -1,0 +1,255 @@
+{
+  "results": [
+    [
+      "0.1",
+      "Owner login (owner@test.com)",
+      "PASS",
+      ""
+    ],
+    [
+      "0.2",
+      "Editor login (editor@test.com)",
+      "PASS",
+      ""
+    ],
+    [
+      "1.1-A",
+      "Create project (contractAmount=100000)",
+      "PASS",
+      "id=8bc0a6e7..."
+    ],
+    [
+      "1.1-B",
+      "Payment stages sum auto-calc",
+      "PASS",
+      "sum=100000"
+    ],
+    [
+      "1.2",
+      "Batch create 3 product units",
+      "PASS",
+      "count=3"
+    ],
+    [
+      "1.3",
+      "Upload images (total=9)",
+      "PASS",
+      "count=9"
+    ],
+    [
+      "2.1",
+      "Create 3 annotations + assign to editor",
+      "PASS",
+      "cards=3"
+    ],
+    [
+      "2.3",
+      "Share link generated",
+      "PASS",
+      "token=b1085d95d3dc..."
+    ],
+    [
+      "2.4",
+      "Timeline view",
+      "PASS",
+      "events=1"
+    ],
+    [
+      "3.1",
+      "Editor task list",
+      "PASS",
+      "tasks=20"
+    ],
+    [
+      "3.2",
+      "Quick resolve 3 cards",
+      "PASS",
+      ""
+    ],
+    [
+      "3.3-A",
+      "Dispute - owner marks",
+      "PASS",
+      ""
+    ],
+    [
+      "3.3-B",
+      "Disputed card appears",
+      "PASS",
+      ""
+    ],
+    [
+      "3.3-C",
+      "Dispute re-resolved",
+      "PASS",
+      ""
+    ],
+    [
+      "4.1",
+      "Client share link opens",
+      "PASS",
+      "project="
+    ],
+    [
+      "4.3",
+      "Client annotations (2)",
+      "PASS",
+      "count=2"
+    ],
+    [
+      "4.4",
+      "Client confirm",
+      "PASS",
+      "code=200"
+    ],
+    [
+      "4.5",
+      "Client modify request",
+      "PASS",
+      "code=200"
+    ],
+    [
+      "5.1-A",
+      "War room loads",
+      "PASS",
+      ""
+    ],
+    [
+      "5.1-B",
+      "War room - financeSummary",
+      "PASS",
+      ""
+    ],
+    [
+      "5.1-C",
+      "War room - memberLoads",
+      "PASS",
+      ""
+    ],
+    [
+      "5.3-A",
+      "Color check - initiate",
+      "PASS",
+      "code=200"
+    ],
+    [
+      "5.3-B",
+      "Color check - result",
+      "PASS",
+      "code=200"
+    ],
+    [
+      "5.4-A",
+      "Light consistency check - initiate",
+      "PASS",
+      "code=200"
+    ],
+    [
+      "5.4-B",
+      "Light consistency check - result",
+      "PASS",
+      "code=200"
+    ],
+    [
+      "6.1-A",
+      "Create portfolio",
+      "PASS",
+      ""
+    ],
+    [
+      "6.1-B",
+      "Portfolio - add images + publish",
+      "PASS",
+      "code=200"
+    ],
+    [
+      "6.2-A",
+      "Finance - add 3 expenses, total=11500",
+      "PASS",
+      "total=11500"
+    ],
+    [
+      "6.2-B",
+      "Edit expense 2000->2500",
+      "PASS",
+      "total=12000"
+    ],
+    [
+      "6.2-C",
+      "Delete expense, profit=89500",
+      "PASS",
+      "expenses=10500,profit=89500"
+    ],
+    [
+      "6.3-A",
+      "Save delivery defaults",
+      "PASS",
+      "code=200"
+    ],
+    [
+      "6.3-B",
+      "Delivery package ZIP download",
+      "PASS",
+      "size=10036b"
+    ],
+    [
+      "6.3-C",
+      "Defaults saved + reusable",
+      "PASS",
+      ""
+    ],
+    [
+      "7.1",
+      "Batch archive",
+      "PASS",
+      "success=1"
+    ],
+    [
+      "7.2",
+      "Batch update deadline",
+      "PASS",
+      "success=2"
+    ],
+    [
+      "7.3",
+      "Batch delete draft",
+      "PASS",
+      "success=1"
+    ],
+    [
+      "8.1-A",
+      "War room export - Excel",
+      "PASS",
+      "size=18028b"
+    ],
+    [
+      "8.1-B",
+      "War room export - PDF",
+      "PASS",
+      "size=16353b"
+    ],
+    [
+      "8.2",
+      "Operation logs",
+      "PASS",
+      "logs=6"
+    ],
+    [
+      "8.3",
+      "Notification system",
+      "PASS",
+      "notifications=11"
+    ],
+    [
+      "8.4",
+      "Timeline completeness",
+      "PASS",
+      "events=3"
+    ]
+  ],
+  "pass": 41,
+  "fail": 0,
+  "info": 0,
+  "total": 41,
+  "duration": 9.351667165756226
+}

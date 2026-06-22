@@ -2,26 +2,30 @@
   <div class="consistency-page">
     <!-- 6.1 BETA 安全声明横幅 -->
     <div class="beta-banner">
-      <span class="beta-banner-icon">⚠️</span>
+      <AlertTriangle :size="16" class="beta-banner-icon-svg" />
       <span class="beta-banner-text">BETA功能：巡检结果仅供参考，不会自动修改任何图片。</span>
     </div>
 
     <!-- 头部 -->
     <div class="check-header">
       <div class="header-left">
-        <button class="btn-back" @click="router.back()">
-          <span>← 返回</span>
-        </button>
-        <h1 class="page-title">光影一致性巡检</h1>
-        <span class="badge badge--beta">BETA</span>
+        <!-- NAV-02: 面包屑导航 -->
+        <nav class="breadcrumb-nav">
+          <router-link to="/projects" class="breadcrumb-link">项目看板</router-link>
+          <span class="breadcrumb-sep">›</span>
+          <router-link :to="`/project/${projectId}`" class="breadcrumb-link">项目详情</router-link>
+          <span class="breadcrumb-sep">›</span>
+          <span class="breadcrumb-current">光影一致性巡检</span>
+        </nav>
       </div>
+      <span class="badge badge--beta">BETA</span>
       <div class="header-actions">
         <button class="btn-inspect" @click="runCheck" :disabled="checking">
           <span v-if="checking" class="spinner"></span>
           {{ checking ? '巡检中...' : '一键巡检' }}
         </button>
         <button class="btn-export" v-if="report && !checking" :disabled="exporting" @click="exportPdf">
-          导出报告
+          打印
         </button>
       </div>
     </div>
@@ -207,12 +211,12 @@
 
 <script setup lang="ts">
 import { ref, computed, onUnmounted } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
+import { useRoute } from 'vue-router'
 import { aiApi } from '@/api/ai'
 import client from '@/api/client'
 import type { ConsistencyReport, ConsistencyAnomaly } from '@/types/models'
+import { AlertTriangle } from 'lucide-vue-next'
 
-const router = useRouter()
 const route = useRoute()
 
 const projectId = computed(() => route.params.id as string)
@@ -814,5 +818,51 @@ onUnmounted(() => {
 
   .clear-icon { font-size: 48px; display: block; margin-bottom: 12px; }
   p { font-size: 15px; }
+}
+
+@media (max-width: 768px) {
+  .consistency-page {
+    .check-header {
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px 16px;
+    }
+
+    .header-actions {
+      width: 100%;
+      flex-wrap: wrap;
+    }
+  }
+
+  .progress-bar-wrap {
+    padding: 12px 16px;
+  }
+
+  .results-container {
+    padding: 16px 12px;
+  }
+
+  .overview-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .score-card {
+    width: 100px;
+    height: 80px;
+  }
+
+  .scene-grid {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+
+  .anomaly-image-row {
+    flex-wrap: wrap;
+  }
+
+  button, .btn {
+    min-height: 44px;
+  }
 }
 </style>
